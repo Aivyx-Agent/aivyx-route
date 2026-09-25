@@ -5,11 +5,13 @@
 //! `docs/superpowers/specs/2026-09-25-model-routing-design.md`.
 
 pub mod config;
+pub mod merge;
 pub mod profile;
 pub mod requirements;
 pub mod select;
 
 pub use config::{EndpointConfig, EndpointKind, RosterEntry, RoutingConfig};
+pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,
     Strength, Tier,
