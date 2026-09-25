@@ -141,6 +141,19 @@ impl fmt::Display for EndpointRef {
     }
 }
 
+/// Identifies one model: the same id on two endpoints is two models.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ModelKey {
+    pub endpoint: EndpointRef,
+    pub id: String,
+}
+
+impl fmt::Display for ModelKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}@{}", self.id, self.endpoint)
+    }
+}
+
 /// Where a profile's facts came from, for `explain`-style output.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProfileSource {
@@ -182,6 +195,13 @@ impl ModelProfile {
             priority: 0,
             availability: Availability::Available,
             source: ProfileSource::default(),
+        }
+    }
+
+    pub fn key(&self) -> ModelKey {
+        ModelKey {
+            endpoint: self.endpoint.clone(),
+            id: self.id.clone(),
         }
     }
 
@@ -271,5 +291,19 @@ mod tests {
         assert_eq!(t, Tier::Small);
         let e: EndpointRef = serde_json::from_str("\"ollama-main\"").unwrap();
         assert_eq!(e, EndpointRef::new("ollama-main"));
+    }
+
+    #[test]
+    fn a_profile_is_identified_by_endpoint_and_id() {
+        let p = ModelProfile::new("qwen3:8b", EndpointRef::new("gpu"));
+        let k = p.key();
+        assert_eq!(
+            k,
+            ModelKey {
+                endpoint: EndpointRef::new("gpu"),
+                id: "qwen3:8b".into()
+            }
+        );
+        assert_eq!(k.to_string(), "qwen3:8b@gpu");
     }
 }

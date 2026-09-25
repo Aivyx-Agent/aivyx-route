@@ -5,7 +5,8 @@ use std::cmp::Reverse;
 use std::fmt;
 
 use crate::profile::{
-    Availability, Capability, CapabilitySet, Locality, ModelProfile, Strength, Tier,
+    Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelKey, ModelProfile,
+    Strength, Tier,
 };
 use crate::requirements::{HardNeed, Requirements};
 
@@ -13,11 +14,11 @@ use crate::requirements::{HardNeed, Requirements};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Policy {
     /// The conversation's current model. Kept if it meets every hard need.
-    pub sticky_model: Option<String>,
+    pub sticky_model: Option<ModelKey>,
     /// Cloud profiles are candidates only when `true`.
     pub allow_cloud: bool,
-    /// Model ids never to select.
-    pub exclude: Vec<String>,
+    /// Models never to select.
+    pub exclude: Vec<ModelKey>,
 }
 
 /// One clause of a decision's explanation.
@@ -147,8 +148,8 @@ pub fn select(
     let mut reason: Vec<ReasonPart> = needs.iter().map(|n| ReasonPart::Required(*n)).collect();
     let sticky_pos = policy
         .sticky_model
-        .as_deref()
-        .and_then(|id| ranked.iter().position(|p| p.id == id));
+        .as_ref()
+        .and_then(|k| ranked.iter().position(|p| p.key() == *k));
     let model = match sticky_pos {
         Some(pos) => {
             reason.push(ReasonPart::Sticky);
@@ -176,7 +177,7 @@ pub fn select(
 
 fn is_eligible(p: &ModelProfile, req: &Requirements, policy: &Policy) -> bool {
     p.availability != Availability::Unavailable
-        && !policy.exclude.contains(&p.id)
+        && !policy.exclude.contains(&p.key())
         && (policy.allow_cloud || p.locality == Locality::Local)
         && (req.hard.embedding || !p.is_embedding_only())
 }
@@ -226,7 +227,15 @@ fn tier_penalty(wanted: Option<Tier>, got: Tier) -> u8 {
     }
 }
 
-type RankKey = (bool, bool, u8, Reverse<usize>, Reverse<i32>, String);
+type RankKey = (
+    bool,
+    bool,
+    u8,
+    Reverse<usize>,
+    Reverse<i32>,
+    EndpointRef,
+    String,
+);
 
 fn rank_key(p: &ModelProfile, req: &Requirements) -> RankKey {
     let relies_on_unknown_caps = !assumed_capabilities(p, &req.hard.needs()).is_empty();
@@ -238,6 +247,7 @@ fn rank_key(p: &ModelProfile, req: &Requirements) -> RankKey {
         tier_penalty(req.soft.tier, p.tier),
         Reverse(overlap),
         Reverse(p.priority),
+        p.endpoint.clone(),
         p.id.clone(),
     )
 }
@@ -306,13 +316,25 @@ fn no_candidate(eligible: &[&ModelProfile], needs: &[HardNeed], req: &Requiremen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::EndpointRef;
+    use crate::profile::ModelKey;
     use crate::requirements::{RequirementsBuilder, TaskKind, TaskOverrides};
 
     fn m(id: &str, tier: Tier) -> ModelProfile {
         let mut p = ModelProfile::new(id, EndpointRef::new("local"));
         p.tier = tier;
         p.capabilities.insert(Capability::Completion);
+        p
+    }
+
+    fn key(id: &str) -> ModelKey {
+        ModelKey {
+            endpoint: EndpointRef::new("local"),
+            id: id.into(),
+        }
+    }
+
+    fn on(mut p: ModelProfile, endpoint: &str) -> ModelProfile {
+        p.endpoint = EndpointRef::new(endpoint);
         p
     }
 
@@ -460,7 +482,7 @@ mod tests {
         let req = for_task(TaskKind::Chat).build();
         let better = with_strengths(m("better", Tier::Medium), &[Strength::Chat]);
         let policy = Policy {
-            sticky_model: Some("current".into()),
+            sticky_model: Some(key("current")),
             ..Policy::default()
         };
         let d = select(&req, &[better, m("current", Tier::Small)], &policy).unwrap();
@@ -473,7 +495,7 @@ mod tests {
     fn sticky_model_is_replaced_when_it_fails_a_hard_need() {
         let req = for_task(TaskKind::Chat).vision().build();
         let policy = Policy {
-            sticky_model: Some("current".into()),
+            sticky_model: Some(key("current")),
             ..Policy::default()
         };
         let c = [
@@ -522,7 +544,7 @@ mod tests {
     fn excluded_models_are_skipped() {
         let req = for_task(TaskKind::Chat).build();
         let policy = Policy {
-            exclude: vec!["banned".into()],
+            exclude: vec![key("banned")],
             ..Policy::default()
         };
         let d = select(
@@ -728,5 +750,54 @@ mod tests {
             select(&req, &a, &Policy::default()).unwrap(),
             select(&req, &b, &Policy::default()).unwrap()
         );
+    }
+
+    #[test]
+    fn sticky_keeps_the_right_endpoint_for_a_shared_id() {
+        let req = for_task(TaskKind::Chat).build();
+        let c = [
+            on(m("qwen3:8b", Tier::Medium), "a-gpu"),
+            on(m("qwen3:8b", Tier::Medium), "b-gpu"),
+        ];
+        let policy = Policy {
+            sticky_model: Some(ModelKey {
+                endpoint: EndpointRef::new("b-gpu"),
+                id: "qwen3:8b".into(),
+            }),
+            ..Policy::default()
+        };
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.endpoint, EndpointRef::new("b-gpu"));
+        assert_eq!(d.reason, vec![ReasonPart::Sticky]);
+    }
+
+    #[test]
+    fn excluding_one_endpoints_copy_leaves_the_other() {
+        let req = for_task(TaskKind::Chat).build();
+        let c = [
+            on(m("qwen3:8b", Tier::Medium), "a-gpu"),
+            on(m("qwen3:8b", Tier::Medium), "b-gpu"),
+        ];
+        let policy = Policy {
+            exclude: vec![ModelKey {
+                endpoint: EndpointRef::new("a-gpu"),
+                id: "qwen3:8b".into(),
+            }],
+            ..Policy::default()
+        };
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.endpoint, EndpointRef::new("b-gpu"));
+        assert!(d.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn a_shared_id_ranks_deterministically_by_endpoint() {
+        let req = for_task(TaskKind::Chat).build();
+        let a = on(m("qwen3:8b", Tier::Medium), "a-gpu");
+        let b = on(m("qwen3:8b", Tier::Medium), "b-gpu");
+        let d1 = select(&req, &[a.clone(), b.clone()], &Policy::default()).unwrap();
+        let d2 = select(&req, &[b, a], &Policy::default()).unwrap();
+        assert_eq!(d1, d2);
+        assert_eq!(d1.model.endpoint, EndpointRef::new("a-gpu"));
     }
 }

@@ -18,8 +18,8 @@ pub use config::{
 };
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
-    Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,
-    Strength, Tier,
+    Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelKey, ModelProfile,
+    ProfileSource, Strength, Tier,
 };
 pub use requirements::{
     HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
