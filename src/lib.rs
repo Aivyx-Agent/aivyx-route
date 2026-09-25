@@ -6,6 +6,7 @@
 
 pub mod profile;
 pub mod requirements;
+pub mod select;
 
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,
@@ -15,3 +16,4 @@ pub use requirements::{
     HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
     TaskOverride, TaskOverrides,
 };
+pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, select};
