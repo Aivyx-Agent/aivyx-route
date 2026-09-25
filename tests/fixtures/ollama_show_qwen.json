@@ -1,0 +1,5 @@
+{
+  "details": { "format": "gguf", "family": "qwen3moe", "parameter_size": "30.5B", "quantization_level": "Q4_K_M" },
+  "model_info": { "general.architecture": "qwen3moe", "qwen3moe.context_length": 262144, "qwen3moe.block_count": 48 },
+  "capabilities": ["completion", "tools", "insert"]
+}

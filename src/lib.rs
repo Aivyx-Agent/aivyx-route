@@ -6,6 +6,8 @@
 
 pub mod classifier;
 pub mod config;
+#[cfg(feature = "discovery")]
+pub mod discovery;
 pub mod merge;
 pub mod profile;
 pub mod requirements;

@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "id": "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M",
+      "path": "/home/user/.cache/llama.cpp/ggml-org_gemma-3-4b-it-GGUF_gemma-3-4b-it-Q4_K_M.gguf",
+      "status": { "value": "loaded", "args": ["llama-server", "-ctx", "4096"] },
+      "architecture": { "input_modalities": ["text", "image"], "output_modalities": ["text"] }
+    },
+    {
+      "id": "unsloth/Qwen3-8B-GGUF:Q4_K_M",
+      "path": "/home/user/.cache/llama.cpp/unsloth_Qwen3-8B-GGUF_Qwen3-8B-Q4_K_M.gguf",
+      "status": { "value": "unloaded" }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "details": { "format": "gguf", "family": "llama", "parameter_size": "13B", "quantization_level": "Q4_0" },
+  "model_info": { "general.architecture": "llama", "general.parameter_count": 13015864320, "llama.context_length": 4096, "llama.embedding_length": 5120 },
+  "capabilities": ["completion", "vision"]
+}
