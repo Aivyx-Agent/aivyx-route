@@ -4,10 +4,12 @@
 //! request needs, and ask for a deterministic choice. See
 //! `docs/superpowers/specs/2026-09-25-model-routing-design.md`.
 
+pub mod config;
 pub mod profile;
 pub mod requirements;
 pub mod select;
 
+pub use config::{EndpointConfig, EndpointKind, RosterEntry, RoutingConfig};
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,
     Strength, Tier,
