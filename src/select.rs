@@ -107,7 +107,12 @@ pub struct NoCandidate {
 impl fmt::Display for NoCandidate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.considered == 0 {
-            return f.write_str("no candidate models are available");
+            f.write_str("no candidate models are available")?;
+            if !self.unmet.is_empty() {
+                let needs: Vec<String> = self.unmet.iter().map(|u| u.need.to_string()).collect();
+                write!(f, " (needed: {})", needs.join(", "))?;
+            }
+            return Ok(());
         }
         let parts: Vec<String> = self
             .unmet
@@ -161,12 +166,14 @@ pub fn select(
         None => {
             let model = ranked.remove(0);
             explain_rank(model, &ranked, req, &mut reason);
+            // Ranking put known windows first, so this one won only because
+            // none qualified. Not true of a kept sticky model.
+            if req.hard.min_context.is_some() && model.context_window.is_none() {
+                reason.push(ReasonPart::UnknownContextWindow);
+            }
             model
         }
     };
-    if req.hard.min_context.is_some() && model.context_window.is_none() {
-        reason.push(ReasonPart::UnknownContextWindow);
-    }
     let assumed = assumed_capabilities(model, &needs);
     if !assumed.is_empty() {
         reason.push(ReasonPart::UnverifiedCapabilities(assumed));
@@ -872,5 +879,61 @@ mod tests {
         };
         assert_eq!(find(&c, &k).map(|p| p.tier), Some(Tier::Large));
         assert!(find(&c, &key("missing")).is_none());
+    }
+
+    #[test]
+    fn a_kept_sticky_model_does_not_claim_nothing_better_qualified() {
+        let req = for_task(TaskKind::Chat).min_context(32_000).build();
+        let mut big = m("big", Tier::Medium);
+        big.context_window = Some(131_072);
+        let policy = Policy {
+            sticky_model: Some(key("current")),
+            ..Policy::default()
+        };
+        let d = select(&req, &[big, m("current", Tier::Medium)], &policy).unwrap();
+        assert_eq!(d.model.id, "current");
+        assert_eq!(
+            d.reason,
+            vec![
+                ReasonPart::Required(HardNeed::Context(32_000)),
+                ReasonPart::Sticky
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sticky_key_not_among_candidates_falls_back_to_ranking() {
+        let req = for_task(TaskKind::Chat).build();
+        let policy = Policy {
+            sticky_model: Some(key("gone")),
+            ..Policy::default()
+        };
+        let d = select(&req, &[m("a", Tier::Medium), m("b", Tier::Small)], &policy).unwrap();
+        assert_eq!(d.model.id, "a");
+        assert!(!d.reason.contains(&ReasonPart::Sticky));
+    }
+
+    #[test]
+    fn no_candidates_at_all_still_names_every_need() {
+        let req = for_task(TaskKind::Chat).vision().tools().build();
+        let err = select(&req, &[], &Policy::default()).unwrap_err();
+        assert_eq!(err.considered, 0);
+        assert_eq!(
+            err.unmet,
+            vec![
+                Unmet {
+                    need: HardNeed::Vision,
+                    near_miss: None
+                },
+                Unmet {
+                    need: HardNeed::Tools,
+                    near_miss: None
+                },
+            ]
+        );
+        assert_eq!(
+            err.to_string(),
+            "no candidate models are available (needed: vision, tool calling)"
+        );
     }
 }

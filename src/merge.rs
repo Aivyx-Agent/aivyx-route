@@ -42,8 +42,9 @@ pub struct DiscoveryReport {
 /// fails closed: its models are `Cloud` and `Unavailable`. An explicit
 /// roster `locality` still overrides the locality, never the availability.
 ///
-/// Duplicate roster entries for the same (endpoint, id) apply in order; a capability
-/// denied by any of them is always removed.
+/// Duplicate roster entries for the same (endpoint, id) apply in order, each
+/// overriding only the fields it sets; a capability denied by any of them is
+/// always removed.
 pub fn merge(
     config: &RoutingConfig,
     default: &DefaultEndpoint,
@@ -120,8 +121,12 @@ pub fn merge(
         if let Some(tier) = entry.tier {
             p.tier = tier;
         }
-        p.strengths = entry.strengths.clone();
-        p.priority = entry.priority;
+        if let Some(strengths) = &entry.strengths {
+            p.strengths = strengths.clone();
+        }
+        if let Some(priority) = entry.priority {
+            p.priority = priority;
+        }
         if let Some(locality) = entry.locality {
             p.locality = locality;
         }
@@ -194,8 +199,8 @@ mod tests {
             endpoint: None,
             locality: None,
             tier: None,
-            strengths: BTreeSet::new(),
-            priority: 0,
+            strengths: None,
+            priority: None,
             capabilities: CapabilitySet::new(),
             capabilities_deny: CapabilitySet::new(),
             context_window: None,
@@ -240,8 +245,8 @@ mod tests {
     fn roster_adds_and_denies_capabilities_and_sets_judgements() {
         let mut e = entry("llava:13b");
         e.tier = Some(Tier::Small);
-        e.strengths = BTreeSet::from([Strength::Chat]);
-        e.priority = 3;
+        e.strengths = Some(BTreeSet::from([Strength::Chat]));
+        e.priority = Some(3);
         e.capabilities = CapabilitySet::from([Capability::Thinking]);
         e.capabilities_deny = CapabilitySet::from([Capability::Tools]);
         let reports = [reached(
@@ -412,11 +417,11 @@ mod tests {
     fn duplicate_entries_apply_other_fields_in_order() {
         let mut e1 = entry("m");
         e1.tier = Some(Tier::Small);
-        e1.priority = 1;
+        e1.priority = Some(1);
 
         let mut e2 = entry("m");
         e2.tier = Some(Tier::Large);
-        e2.priority = 7;
+        e2.priority = Some(7);
 
         let reports = [reached("main", vec![found("m", &[], None)])];
         let ps = merge(&config_with(vec![e1, e2]), &local_default("main"), &reports);
@@ -542,5 +547,21 @@ mod tests {
         let p = find(&ps, "claude-sonnet-5");
         assert_eq!(p.locality, Locality::Cloud);
         assert_eq!(p.availability, Availability::Unverified);
+    }
+
+    #[test]
+    fn a_later_duplicate_entry_overrides_only_the_fields_it_sets() {
+        let mut e1 = entry("m");
+        e1.strengths = Some(BTreeSet::from([Strength::Code]));
+        e1.priority = Some(4);
+        e1.tier = Some(Tier::Small);
+        let mut e2 = entry("m");
+        e2.tier = Some(Tier::Large);
+        let reports = [reached("main", vec![found("m", &[], None)])];
+        let ps = merge(&config_with(vec![e1, e2]), &local_default("main"), &reports);
+        let p = find(&ps, "m");
+        assert_eq!(p.tier, Tier::Large);
+        assert_eq!(p.strengths, BTreeSet::from([Strength::Code]));
+        assert_eq!(p.priority, 4);
     }
 }

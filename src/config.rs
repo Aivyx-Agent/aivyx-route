@@ -172,10 +172,11 @@ pub struct RosterEntry {
     pub locality: Option<Locality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
-    #[serde(default)]
-    pub strengths: BTreeSet<Strength>,
-    #[serde(default)]
-    pub priority: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strengths: Option<BTreeSet<Strength>>,
+    /// Operator tie-break; higher wins. Unset = 0 (or an earlier entry's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// Added to what discovery found.
     #[serde(default)]
     pub capabilities: CapabilitySet,
@@ -190,8 +191,6 @@ pub struct RosterEntry {
 mod tests {
     use super::*;
     use crate::profile::Capability;
-    use serde::Deserialize;
-    use std::collections::BTreeSet;
 
     #[derive(Deserialize)]
     struct Doc {
@@ -239,9 +238,9 @@ summarize = { tier = "small" }
         assert_eq!(qwen.tier, Some(Tier::Large));
         assert_eq!(
             qwen.strengths,
-            BTreeSet::from([Strength::Code, Strength::Reasoning])
+            Some(BTreeSet::from([Strength::Code, Strength::Reasoning]))
         );
-        assert_eq!(qwen.priority, 10);
+        assert_eq!(qwen.priority, Some(10));
         let llava = &c.models[1];
         assert_eq!(llava.endpoint, None);
         assert_eq!(
@@ -308,7 +307,8 @@ summarize = { tier = "small" }
         assert_eq!(e.locality, Some(Locality::Cloud));
         let e: RosterEntry = toml::from_str("id = \"x\"").unwrap();
         assert_eq!(e.locality, None);
-        assert_eq!(e.priority, 0);
+        assert_eq!(e.priority, None);
+        assert_eq!(e.strengths, None);
     }
 
     fn local_default() -> DefaultEndpoint {
