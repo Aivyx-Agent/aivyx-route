@@ -13,7 +13,9 @@ pub mod profile;
 pub mod requirements;
 pub mod select;
 
-pub use config::{EndpointConfig, EndpointKind, RosterEntry, RoutingConfig};
+pub use config::{
+    ConfigIssue, DefaultEndpoint, EndpointConfig, EndpointKind, RosterEntry, RoutingConfig,
+};
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,

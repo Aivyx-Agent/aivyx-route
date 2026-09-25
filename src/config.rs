@@ -2,9 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use std::fmt;
 
-use crate::profile::{CapabilitySet, Locality, Strength, Tier};
+use serde::{Deserialize, Serialize};
+
+use crate::profile::{CapabilitySet, EndpointRef, Locality, Strength, Tier};
 use crate::requirements::TaskOverrides;
 
 /// The `[routing]` section. Unknown keys are ignored so each product can
@@ -29,6 +31,84 @@ impl Default for RoutingConfig {
             models: Vec::new(),
             tasks: TaskOverrides::default(),
         }
+    }
+}
+
+/// The product's own default backend: where roster entries without an
+/// `endpoint` live. Its kind decides their locality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultEndpoint {
+    pub name: EndpointRef,
+    pub kind: EndpointKind,
+}
+
+/// A problem [`RoutingConfig::validate`] found. None is fatal; products
+/// should warn at startup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "issue", rename_all = "snake_case")]
+pub enum ConfigIssue {
+    /// A roster entry names an endpoint that is neither the default nor in
+    /// `[routing.endpoints]`. Its model is never selected.
+    UnknownEndpoint { model: String, endpoint: String },
+    /// The same (endpoint, id) appears in more than one roster entry.
+    DuplicateModel { endpoint: String, model: String },
+    /// A local endpoint with no `base_url` and no default for its kind.
+    MissingBaseUrl { endpoint: String },
+}
+
+impl fmt::Display for ConfigIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigIssue::UnknownEndpoint { model, endpoint } => write!(
+                f,
+                "model `{model}` names endpoint `{endpoint}`, which is not configured; it will never be selected"
+            ),
+            ConfigIssue::DuplicateModel { endpoint, model } => {
+                write!(
+                    f,
+                    "model `{model}` on endpoint `{endpoint}` is listed more than once"
+                )
+            }
+            ConfigIssue::MissingBaseUrl { endpoint } => write!(
+                f,
+                "endpoint `{endpoint}` has no base_url and its kind has no default"
+            ),
+        }
+    }
+}
+
+impl RoutingConfig {
+    /// Report configuration mistakes. Pure; endpoint issues come first (in
+    /// name order), then roster issues (in roster order).
+    pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
+        let mut issues: Vec<ConfigIssue> = self
+            .endpoints
+            .iter()
+            .filter(|(_, c)| c.kind.locality() == Locality::Local && c.base_url().is_none())
+            .map(|(name, _)| ConfigIssue::MissingBaseUrl {
+                endpoint: name.clone(),
+            })
+            .collect();
+        let mut seen = BTreeSet::new();
+        for entry in &self.models {
+            let endpoint = entry
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| default.name.as_str().to_owned());
+            if endpoint != default.name.as_str() && !self.endpoints.contains_key(&endpoint) {
+                issues.push(ConfigIssue::UnknownEndpoint {
+                    model: entry.id.clone(),
+                    endpoint: endpoint.clone(),
+                });
+            }
+            if !seen.insert((endpoint.clone(), entry.id.clone())) {
+                issues.push(ConfigIssue::DuplicateModel {
+                    endpoint,
+                    model: entry.id.clone(),
+                });
+            }
+        }
+        issues
     }
 }
 
@@ -229,5 +309,74 @@ summarize = { tier = "small" }
         let e: RosterEntry = toml::from_str("id = \"x\"").unwrap();
         assert_eq!(e.locality, None);
         assert_eq!(e.priority, 0);
+    }
+
+    fn local_default() -> DefaultEndpoint {
+        DefaultEndpoint {
+            name: EndpointRef::new("main"),
+            kind: EndpointKind::Ollama,
+        }
+    }
+
+    #[test]
+    fn a_clean_config_has_no_issues() {
+        let c = toml::from_str::<Doc>(SPEC_EXAMPLE).unwrap().routing;
+        assert_eq!(c.validate(&local_default()), vec![]);
+    }
+
+    #[test]
+    fn validate_reports_every_issue_kind_in_order() {
+        let c = toml::from_str::<Doc>(
+            r#"
+[routing.endpoints.jan]
+kind = "openai_compat"
+
+[routing.endpoints.gpu]
+kind = "ollama"
+
+[[routing.models]]
+id = "a"
+endpoint = "olama"
+
+[[routing.models]]
+id = "b"
+
+[[routing.models]]
+id = "b"
+endpoint = "main"
+
+[[routing.models]]
+id = "b"
+endpoint = "gpu"
+"#,
+        )
+        .unwrap()
+        .routing;
+        let issues = c.validate(&local_default());
+        assert_eq!(
+            issues,
+            vec![
+                ConfigIssue::MissingBaseUrl {
+                    endpoint: "jan".into()
+                },
+                ConfigIssue::UnknownEndpoint {
+                    model: "a".into(),
+                    endpoint: "olama".into()
+                },
+                ConfigIssue::DuplicateModel {
+                    endpoint: "main".into(),
+                    model: "b".into()
+                },
+            ]
+        );
+        let text: Vec<String> = issues.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            text,
+            vec![
+                "endpoint `jan` has no base_url and its kind has no default",
+                "model `a` names endpoint `olama`, which is not configured; it will never be selected",
+                "model `b` on endpoint `main` is listed more than once",
+            ]
+        );
     }
 }

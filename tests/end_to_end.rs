@@ -3,7 +3,8 @@
 
 use aivyx_route::discovery::discover_all;
 use aivyx_route::{
-    DiscoveryOutcome, EndpointRef, Policy, Requirements, RoutingConfig, TaskKind, merge, select,
+    DefaultEndpoint, DiscoveryOutcome, EndpointKind, EndpointRef, Policy, Requirements,
+    RoutingConfig, TaskKind, merge, select,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -85,7 +86,14 @@ context_window = 200000
     assert!(matches!(reports[0].outcome, DiscoveryOutcome::NotProbed)); // "anthropic" sorts first
     assert!(matches!(reports[1].outcome, DiscoveryOutcome::Reached(_)));
 
-    let profiles = merge(&config, &EndpointRef::new("gpu"), &reports);
+    let profiles = merge(
+        &config,
+        &DefaultEndpoint {
+            name: EndpointRef::new("gpu"),
+            kind: EndpointKind::Ollama,
+        },
+        &reports,
+    );
     assert_eq!(profiles.len(), 4);
 
     let local = Policy::default();
@@ -163,7 +171,14 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
 
     let config = toml::from_str::<Doc>(&toml_src("")).unwrap().routing;
     let reports = discover_all(&config, &reqwest::Client::new()).await;
-    let profiles = merge(&config, &EndpointRef::new("local"), &reports);
+    let profiles = merge(
+        &config,
+        &DefaultEndpoint {
+            name: EndpointRef::new("local"),
+            kind: EndpointKind::OpenaiCompat,
+        },
+        &reports,
+    );
     let d = select(&req, &profiles, &Policy::default()).unwrap();
     assert_eq!(d.model.id, "qwen3-8b-q4_k_m.gguf");
     assert!(
@@ -173,6 +188,13 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
 
     let denied = "[[routing.models]]\nid = \"qwen3-8b-q4_k_m.gguf\"\nendpoint = \"local\"\ncapabilities_deny = [\"tools\"]\n";
     let config = toml::from_str::<Doc>(&toml_src(denied)).unwrap().routing;
-    let profiles = merge(&config, &EndpointRef::new("local"), &reports);
+    let profiles = merge(
+        &config,
+        &DefaultEndpoint {
+            name: EndpointRef::new("local"),
+            kind: EndpointKind::OpenaiCompat,
+        },
+        &reports,
+    );
     assert!(select(&req, &profiles, &Policy::default()).is_err());
 }

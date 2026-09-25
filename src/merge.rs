@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::RoutingConfig;
+use crate::config::{DefaultEndpoint, RoutingConfig};
 use crate::profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile,
 };
@@ -35,19 +35,29 @@ pub struct DiscoveryReport {
 /// Build the candidate list: every discovered model, enriched/overridden by
 /// roster entries, plus roster-only models. Sorted by `(endpoint, id)`.
 ///
+/// An endpoint that is neither `default` nor a `[routing.endpoints]` key
+/// fails closed: its models are `Cloud` and `Unavailable`. An explicit
+/// roster `locality` still overrides the locality, never the availability.
+///
 /// Duplicate roster entries for the same (endpoint, id) apply in order; a capability
 /// denied by any of them is always removed.
 pub fn merge(
     config: &RoutingConfig,
-    default_endpoint: &EndpointRef,
+    default: &DefaultEndpoint,
     reports: &[DiscoveryReport],
 ) -> Vec<ModelProfile> {
-    let endpoint_locality = |ep: &EndpointRef| {
-        config
-            .endpoints
-            .get(ep.as_str())
-            .map_or(Locality::Local, |c| c.kind.locality())
+    // `None` = an endpoint neither the default nor configured.
+    let endpoint_kind = |ep: &EndpointRef| {
+        if *ep == default.name {
+            Some(default.kind)
+        } else {
+            config.endpoints.get(ep.as_str()).map(|c| c.kind)
+        }
     };
+    // Unknown endpoints fail closed: a typo must never make a cloud model
+    // look local.
+    let endpoint_locality =
+        |ep: &EndpointRef| endpoint_kind(ep).map_or(Locality::Cloud, |k| k.locality());
     let outcome_of = |ep: &EndpointRef| {
         reports
             .iter()
@@ -79,7 +89,7 @@ pub fn merge(
             .endpoint
             .as_deref()
             .map(EndpointRef::new)
-            .unwrap_or_else(|| default_endpoint.clone());
+            .unwrap_or_else(|| default.name.clone());
         let key = (ep.clone(), entry.id.clone());
 
         // Track all denies for this key.
@@ -122,18 +132,31 @@ pub fn merge(
         }
     }
 
+    for p in profiles.values_mut() {
+        if endpoint_kind(&p.endpoint).is_none() {
+            p.availability = Availability::Unavailable;
+        }
+    }
+
     profiles.into_values().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{EndpointConfig, EndpointKind, RosterEntry};
+    use crate::config::{DefaultEndpoint, EndpointConfig, EndpointKind, RosterEntry};
     use crate::profile::{ProfileSource, Strength, Tier};
     use std::collections::BTreeSet;
 
     fn ep(name: &str) -> EndpointRef {
         EndpointRef::new(name)
+    }
+
+    fn local_default(name: &str) -> DefaultEndpoint {
+        DefaultEndpoint {
+            name: ep(name),
+            kind: EndpointKind::Ollama,
+        }
     }
 
     fn found(id: &str, caps: &[Capability], ctx: Option<u32>) -> DiscoveredModel {
@@ -193,7 +216,7 @@ mod tests {
             "main",
             vec![found("qwen3:8b", &[Capability::Tools], Some(40_960))],
         )];
-        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        let ps = merge(&RoutingConfig::default(), &local_default("main"), &reports);
         let p = find(&ps, "qwen3:8b");
         assert_eq!(p.capabilities, CapabilitySet::from([Capability::Tools]));
         assert_eq!(p.context_window, Some(40_960));
@@ -230,7 +253,7 @@ mod tests {
                 Some(4_096),
             )],
         )];
-        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e]), &local_default("main"), &reports);
         let p = find(&ps, "llava:13b");
         assert_eq!(
             p.capabilities,
@@ -262,18 +285,26 @@ mod tests {
         let mut e = entry("m");
         e.context_window = Some(32_768);
         let reports = [reached("main", vec![found("m", &[], Some(131_072))])];
-        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e]), &local_default("main"), &reports);
         assert_eq!(find(&ps, "m").context_window, Some(32_768));
     }
 
     #[test]
     fn roster_only_models_are_unverified() {
-        let ps = merge(&config_with(vec![entry("ghost")]), &ep("main"), &[]);
+        let ps = merge(
+            &config_with(vec![entry("ghost")]),
+            &local_default("main"),
+            &[],
+        );
         assert_eq!(find(&ps, "ghost").availability, Availability::Unverified);
         assert_eq!(find(&ps, "ghost").endpoint, ep("main"));
 
         let reports = [reached("main", vec![])];
-        let ps = merge(&config_with(vec![entry("ghost")]), &ep("main"), &reports);
+        let ps = merge(
+            &config_with(vec![entry("ghost")]),
+            &local_default("main"),
+            &reports,
+        );
         assert_eq!(find(&ps, "ghost").availability, Availability::Unverified);
     }
 
@@ -283,7 +314,11 @@ mod tests {
             endpoint: ep("main"),
             outcome: DiscoveryOutcome::Unreachable("connection refused".into()),
         }];
-        let ps = merge(&config_with(vec![entry("m")]), &ep("main"), &reports);
+        let ps = merge(
+            &config_with(vec![entry("m")]),
+            &local_default("main"),
+            &reports,
+        );
         assert_eq!(find(&ps, "m").availability, Availability::Unavailable);
     }
 
@@ -302,7 +337,7 @@ mod tests {
         let mut forced = entry("forced");
         forced.locality = Some(Locality::Cloud);
         config.models = vec![claude, forced, entry("local-one")];
-        let ps = merge(&config, &ep("main"), &[]);
+        let ps = merge(&config, &local_default("main"), &[]);
         assert_eq!(find(&ps, "claude-sonnet-5").locality, Locality::Cloud);
         assert_eq!(find(&ps, "forced").locality, Locality::Cloud);
         assert_eq!(find(&ps, "local-one").locality, Locality::Local);
@@ -317,7 +352,7 @@ mod tests {
                 vec![found("qwen3:8b", &[], None), found("aaa", &[], None)],
             ),
         ];
-        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        let ps = merge(&RoutingConfig::default(), &local_default("main"), &reports);
         let keys: Vec<(&str, &str)> = ps
             .iter()
             .map(|p| (p.endpoint.as_str(), p.id.as_str()))
@@ -352,7 +387,7 @@ mod tests {
         // Test with entry1 first, entry2 second
         let ps = merge(
             &config_with(vec![e1.clone(), e2.clone()]),
-            &ep("main"),
+            &local_default("main"),
             &reports,
         );
         let p = find(&ps, "m");
@@ -362,7 +397,7 @@ mod tests {
         );
 
         // Test with entry2 first, entry1 second (should get same result)
-        let ps = merge(&config_with(vec![e2, e1]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e2, e1]), &local_default("main"), &reports);
         let p = find(&ps, "m");
         assert_eq!(
             p.capabilities,
@@ -381,7 +416,7 @@ mod tests {
         e2.priority = 7;
 
         let reports = [reached("main", vec![found("m", &[], None)])];
-        let ps = merge(&config_with(vec![e1, e2]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e1, e2]), &local_default("main"), &reports);
         assert_eq!(ps.len(), 1);
         let p = find(&ps, "m");
         assert_eq!(p.tier, Tier::Large);
@@ -394,14 +429,18 @@ mod tests {
             endpoint: ep("main"),
             outcome: DiscoveryOutcome::NotProbed,
         }];
-        let ps = merge(&config_with(vec![entry("m")]), &ep("main"), &reports);
+        let ps = merge(
+            &config_with(vec![entry("m")]),
+            &local_default("main"),
+            &reports,
+        );
         assert_eq!(find(&ps, "m").availability, Availability::Unverified);
     }
 
     #[test]
     fn discovered_unknown_capabilities_are_carried_over() {
         let reports = [reached("main", vec![found_blind("compat")])];
-        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        let ps = merge(&RoutingConfig::default(), &local_default("main"), &reports);
         assert_eq!(
             find(&ps, "compat").unknown_capabilities,
             Capability::ALL.into_iter().collect::<CapabilitySet>()
@@ -410,7 +449,11 @@ mod tests {
 
     #[test]
     fn roster_only_models_start_with_every_capability_unknown() {
-        let ps = merge(&config_with(vec![entry("ghost")]), &ep("main"), &[]);
+        let ps = merge(
+            &config_with(vec![entry("ghost")]),
+            &local_default("main"),
+            &[],
+        );
         assert_eq!(
             find(&ps, "ghost").unknown_capabilities,
             Capability::ALL.into_iter().collect::<CapabilitySet>()
@@ -423,7 +466,7 @@ mod tests {
         e.capabilities = CapabilitySet::from([Capability::Tools]);
         e.capabilities_deny = CapabilitySet::from([Capability::Vision]);
         let reports = [reached("main", vec![found_blind("compat")])];
-        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e]), &local_default("main"), &reports);
         let p = find(&ps, "compat");
         assert_eq!(p.capabilities, CapabilitySet::from([Capability::Tools]));
         assert_eq!(
@@ -444,13 +487,57 @@ mod tests {
         let mut e = entry("compat");
         e.capabilities_deny = CapabilitySet::from([Capability::Tools]);
         let reports = [reached("main", vec![found_blind("compat")])];
-        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let ps = merge(&config_with(vec![e]), &local_default("main"), &reports);
         let req = Requirements::builder()
             .task(&TaskKind::Chat, &TaskOverrides::default())
             .tools()
             .build();
         assert!(select(&req, &ps, &Policy::default()).is_err());
-        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        let ps = merge(&RoutingConfig::default(), &local_default("main"), &reports);
         assert!(select(&req, &ps, &Policy::default()).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_endpoint_fails_closed() {
+        let mut typo = entry("m");
+        typo.endpoint = Some("olama-main".into());
+        let ps = merge(&config_with(vec![typo]), &local_default("main"), &[]);
+        let p = find(&ps, "m");
+        assert_eq!(p.locality, Locality::Cloud);
+        assert_eq!(p.availability, Availability::Unavailable);
+
+        use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+        use crate::select::{Policy, select};
+        let req = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .build();
+        let allow = Policy {
+            allow_cloud: true,
+            ..Policy::default()
+        };
+        assert!(select(&req, &ps, &allow).is_err());
+    }
+
+    #[test]
+    fn an_explicit_locality_does_not_make_an_unknown_endpoint_available() {
+        let mut typo = entry("m");
+        typo.endpoint = Some("olama-main".into());
+        typo.locality = Some(Locality::Local);
+        let ps = merge(&config_with(vec![typo]), &local_default("main"), &[]);
+        let p = find(&ps, "m");
+        assert_eq!(p.locality, Locality::Local);
+        assert_eq!(p.availability, Availability::Unavailable);
+    }
+
+    #[test]
+    fn a_cloud_default_endpoint_makes_its_models_cloud() {
+        let default = DefaultEndpoint {
+            name: ep("anthropic"),
+            kind: EndpointKind::Anthropic,
+        };
+        let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
+        let p = find(&ps, "claude-sonnet-5");
+        assert_eq!(p.locality, Locality::Cloud);
+        assert_eq!(p.availability, Availability::Unverified);
     }
 }
