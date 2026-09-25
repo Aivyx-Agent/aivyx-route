@@ -38,4 +38,6 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/classifier.rs` — optional small-model classifier prompt/parse.
 - `src/discovery/` — HTTP clients (feature `discovery`); the only I/O.
 
+Models are identified by `ModelKey` (endpoint, id), never by id alone.
+
 Everything outside `src/discovery/` must stay I/O-free and synchronous.
