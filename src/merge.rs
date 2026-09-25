@@ -30,6 +30,9 @@ pub struct DiscoveryReport {
 
 /// Build the candidate list: every discovered model, enriched/overridden by
 /// roster entries, plus roster-only models. Sorted by `(endpoint, id)`.
+///
+/// Duplicate roster entries for the same (endpoint, id) apply in order; a capability
+/// denied by any of them is always removed.
 pub fn merge(
     config: &RoutingConfig,
     default_endpoint: &EndpointRef,
@@ -63,26 +66,33 @@ pub fn merge(
         }
     }
 
+    // Collect all capability denies for each (endpoint, id) key.
+    let mut all_denies: BTreeMap<(EndpointRef, String), CapabilitySet> = BTreeMap::new();
+
     for entry in &config.models {
         let ep = entry
             .endpoint
             .as_deref()
             .map(EndpointRef::new)
             .unwrap_or_else(|| default_endpoint.clone());
-        let p = profiles
-            .entry((ep.clone(), entry.id.clone()))
-            .or_insert_with(|| {
-                let mut p = ModelProfile::new(entry.id.clone(), ep.clone());
-                p.locality = endpoint_locality(&ep);
-                p.availability = match outcome_of(&ep) {
-                    Some(DiscoveryOutcome::Unreachable(_)) => Availability::Unavailable,
-                    _ => Availability::Unverified,
-                };
-                p
-            });
+        let key = (ep.clone(), entry.id.clone());
+
+        // Track all denies for this key.
+        all_denies
+            .entry(key.clone())
+            .or_default()
+            .extend(entry.capabilities_deny.iter().copied());
+
+        let p = profiles.entry(key).or_insert_with(|| {
+            let mut p = ModelProfile::new(entry.id.clone(), ep.clone());
+            p.locality = endpoint_locality(&ep);
+            p.availability = match outcome_of(&ep) {
+                Some(DiscoveryOutcome::Unreachable(_)) => Availability::Unavailable,
+                _ => Availability::Unverified,
+            };
+            p
+        });
         p.capabilities.extend(entry.capabilities.iter().copied());
-        p.capabilities
-            .retain(|c| !entry.capabilities_deny.contains(c));
         if entry.context_window.is_some() {
             p.context_window = entry.context_window;
         }
@@ -95,6 +105,13 @@ pub fn merge(
             p.locality = locality;
         }
         p.source.in_roster = true;
+    }
+
+    // Apply all accumulated denies.
+    for (key, denies) in all_denies {
+        if let Some(p) = profiles.get_mut(&key) {
+            p.capabilities.retain(|c| !denies.contains(c));
+        }
     }
 
     profiles.into_values().collect()
@@ -294,5 +311,71 @@ mod tests {
                 ("b-gpu", "qwen3:8b")
             ]
         );
+    }
+
+    #[test]
+    fn a_deny_from_any_duplicate_entry_wins() {
+        let mut e1 = entry("m");
+        e1.capabilities_deny = CapabilitySet::from([Capability::Tools]);
+
+        let mut e2 = entry("m");
+        e2.capabilities = CapabilitySet::from([Capability::Tools, Capability::Vision]);
+
+        let reports = [reached(
+            "main",
+            vec![found(
+                "m",
+                &[Capability::Completion, Capability::Tools],
+                None,
+            )],
+        )];
+
+        // Test with entry1 first, entry2 second
+        let ps = merge(
+            &config_with(vec![e1.clone(), e2.clone()]),
+            &ep("main"),
+            &reports,
+        );
+        let p = find(&ps, "m");
+        assert_eq!(
+            p.capabilities,
+            CapabilitySet::from([Capability::Completion, Capability::Vision])
+        );
+
+        // Test with entry2 first, entry1 second (should get same result)
+        let ps = merge(&config_with(vec![e2, e1]), &ep("main"), &reports);
+        let p = find(&ps, "m");
+        assert_eq!(
+            p.capabilities,
+            CapabilitySet::from([Capability::Completion, Capability::Vision])
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_apply_other_fields_in_order() {
+        let mut e1 = entry("m");
+        e1.tier = Some(Tier::Small);
+        e1.priority = 1;
+
+        let mut e2 = entry("m");
+        e2.tier = Some(Tier::Large);
+        e2.priority = 7;
+
+        let reports = [reached("main", vec![found("m", &[], None)])];
+        let ps = merge(&config_with(vec![e1, e2]), &ep("main"), &reports);
+        assert_eq!(ps.len(), 1);
+        let p = find(&ps, "m");
+        assert_eq!(p.tier, Tier::Large);
+        assert_eq!(p.priority, 7);
+    }
+
+    #[test]
+    fn not_probed_endpoints_leave_roster_models_unverified() {
+        let reports = [DiscoveryReport {
+            endpoint: ep("main"),
+            outcome: DiscoveryOutcome::NotProbed,
+        }];
+        let ps = merge(&config_with(vec![entry("m")]), &ep("main"), &reports);
+        assert_eq!(find(&ps, "m").availability, Availability::Unverified);
     }
 }
