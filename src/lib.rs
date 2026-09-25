@@ -25,4 +25,4 @@ pub use requirements::{
     HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
     TaskOverride, TaskOverrides,
 };
-pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, select};
+pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, find, select, unmet_needs};

@@ -9,6 +9,11 @@ mod openai_compat;
 
 use std::time::Duration;
 
+/// The `reqwest` this crate is built against. Consumers on a different
+/// reqwest major build the client as
+/// `aivyx_route::discovery::reqwest::Client::new()`.
+pub use reqwest;
+
 use crate::config::{EndpointConfig, EndpointKind, RoutingConfig};
 use crate::merge::{DiscoveryOutcome, DiscoveryReport};
 use crate::profile::EndpointRef;
@@ -169,5 +174,15 @@ mod tests {
             matches!(reports[0].outcome, DiscoveryOutcome::Reached(ref m) if m[0].id == "qwen3-8b-q4_k_m.gguf")
         );
         assert_eq!(reports[1].outcome, DiscoveryOutcome::NotProbed);
+    }
+
+    #[tokio::test]
+    async fn reqwest_is_re_exported_for_consumers() {
+        let client = crate::discovery::reqwest::Client::new();
+        assert!(
+            discover_all(&RoutingConfig::default(), &client)
+                .await
+                .is_empty()
+        );
     }
 }

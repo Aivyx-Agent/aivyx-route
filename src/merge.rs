@@ -2,13 +2,15 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+
 use crate::config::{DefaultEndpoint, RoutingConfig};
 use crate::profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile,
 };
 
 /// What one backend said about one model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveredModel {
     pub id: String,
     pub capabilities: CapabilitySet,
@@ -17,7 +19,8 @@ pub struct DiscoveredModel {
     pub context_window: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DiscoveryOutcome {
     Reached(Vec<DiscoveredModel>),
     /// The endpoint could not be queried; the string says why.
@@ -26,7 +29,7 @@ pub enum DiscoveryOutcome {
     NotProbed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveryReport {
     pub endpoint: EndpointRef,
     pub outcome: DiscoveryOutcome,

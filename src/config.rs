@@ -11,7 +11,7 @@ use crate::requirements::TaskOverrides;
 
 /// The `[routing]` section. Unknown keys are ignored so each product can
 /// add its own sub-tables (e.g. `aivyx-pa`'s `[routing.escalation]`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// `false` (the default) means today's single-model behavior.
@@ -112,7 +112,7 @@ impl RoutingConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndpointKind {
     Ollama,
@@ -144,11 +144,11 @@ impl EndpointKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointConfig {
     pub kind: EndpointKind,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
 }
 
@@ -160,17 +160,17 @@ impl EndpointConfig {
 }
 
 /// One `[[routing.models]]` entry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RosterEntry {
     pub id: String,
     /// Key of `[routing.endpoints]`; `None` = the product's default backend.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// Overrides the locality implied by the endpoint kind.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
     #[serde(default)]
     pub strengths: BTreeSet<Strength>,
@@ -182,7 +182,7 @@ pub struct RosterEntry {
     /// Removed from what discovery found (e.g. unreliable tool calling).
     #[serde(default)]
     pub capabilities_deny: CapabilitySet,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
 }
 
@@ -378,5 +378,17 @@ endpoint = "gpu"
                 "model `b` on endpoint `main` is listed more than once",
             ]
         );
+    }
+
+    #[test]
+    fn routing_config_round_trips_through_toml() {
+        #[derive(Serialize)]
+        struct Out<'a> {
+            routing: &'a RoutingConfig,
+        }
+        let c = toml::from_str::<Doc>(SPEC_EXAMPLE).unwrap().routing;
+        let text = toml::to_string(&Out { routing: &c }).unwrap();
+        let back = toml::from_str::<Doc>(&text).unwrap().routing;
+        assert_eq!(back, c, "{text}");
     }
 }

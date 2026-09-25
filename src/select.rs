@@ -4,6 +4,8 @@
 use std::cmp::Reverse;
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelKey, ModelProfile,
     Strength, Tier,
@@ -22,7 +24,8 @@ pub struct Policy {
 }
 
 /// One clause of a decision's explanation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReasonPart {
     Required(HardNeed),
     Sticky,
@@ -67,7 +70,7 @@ impl fmt::Display for ReasonPart {
 }
 
 /// The chosen model, ranked fallbacks, and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Decision {
     pub model: ModelProfile,
     pub fallbacks: Vec<ModelProfile>,
@@ -86,7 +89,7 @@ impl fmt::Display for Decision {
 }
 
 /// A hard need no eligible model can meet (given the other needs).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unmet {
     pub need: HardNeed,
     /// Best-ranked model that meets every *other* need but not this one.
@@ -94,7 +97,7 @@ pub struct Unmet {
 }
 
 /// No eligible model meets every hard need.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NoCandidate {
     pub unmet: Vec<Unmet>,
     /// How many models survived the eligibility filter.
@@ -173,6 +176,24 @@ pub fn select(
         fallbacks: ranked.into_iter().cloned().collect(),
         reason,
     })
+}
+
+/// Hard needs `profile` definitely fails. Unknown capabilities and an
+/// unknown context window count as met, as in [`select`]. For validating an
+/// explicit operator pin.
+pub fn unmet_needs(req: &Requirements, profile: &ModelProfile) -> Vec<HardNeed> {
+    req.hard
+        .needs()
+        .into_iter()
+        .filter(|n| !satisfies(profile, *n))
+        .collect()
+}
+
+/// The profile with this key, if any.
+pub fn find<'a>(profiles: &'a [ModelProfile], key: &ModelKey) -> Option<&'a ModelProfile> {
+    profiles
+        .iter()
+        .find(|p| p.endpoint == key.endpoint && p.id == key.id)
 }
 
 fn is_eligible(p: &ModelProfile, req: &Requirements, policy: &Policy) -> bool {
@@ -316,7 +337,6 @@ fn no_candidate(eligible: &[&ModelProfile], needs: &[HardNeed], req: &Requiremen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::ModelKey;
     use crate::requirements::{RequirementsBuilder, TaskKind, TaskOverrides};
 
     fn m(id: &str, tier: Tier) -> ModelProfile {
@@ -799,5 +819,58 @@ mod tests {
         let d2 = select(&req, &[b, a], &Policy::default()).unwrap();
         assert_eq!(d1, d2);
         assert_eq!(d1.model.endpoint, EndpointRef::new("a-gpu"));
+    }
+
+    #[test]
+    fn decisions_and_no_candidate_serialize_to_json() {
+        let req = for_task(TaskKind::Chat).tools().build();
+        let c = [with_unknown(
+            m("compat", Tier::Medium),
+            &[Capability::Tools],
+        )];
+        let d = select(&req, &c, &Policy::default()).unwrap();
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["model"]["id"], "compat");
+        assert_eq!(v["model"]["availability"], "available");
+        assert_eq!(v["reason"][0], serde_json::json!({ "required": "tools" }));
+        let req = for_task(TaskKind::Chat).min_context(64).build();
+        let mut small = m("small", Tier::Medium);
+        small.context_window = Some(8);
+        let err = select(&req, &[small], &Policy::default()).unwrap_err();
+        let v = serde_json::to_value(&err).unwrap();
+        assert_eq!(v["unmet"][0]["need"], serde_json::json!({ "context": 64 }));
+    }
+
+    #[test]
+    fn unmet_needs_lists_only_definite_failures() {
+        let req = for_task(TaskKind::Chat)
+            .vision()
+            .tools()
+            .audio()
+            .min_context(32_000)
+            .build();
+        let mut p = with_caps(m("p", Tier::Medium), &[Capability::Vision]);
+        p.unknown_capabilities.insert(Capability::Tools);
+        p.context_window = Some(8_192);
+        assert_eq!(
+            unmet_needs(&req, &p),
+            vec![HardNeed::Audio, HardNeed::Context(32_000)]
+        );
+        p.context_window = None;
+        assert_eq!(unmet_needs(&req, &p), vec![HardNeed::Audio]);
+    }
+
+    #[test]
+    fn find_looks_up_by_key() {
+        let c = [
+            on(m("qwen3:8b", Tier::Medium), "a-gpu"),
+            on(m("qwen3:8b", Tier::Large), "b-gpu"),
+        ];
+        let k = ModelKey {
+            endpoint: EndpointRef::new("b-gpu"),
+            id: "qwen3:8b".into(),
+        };
+        assert_eq!(find(&c, &k).map(|p| p.tier), Some(Tier::Large));
+        assert!(find(&c, &key("missing")).is_none());
     }
 }

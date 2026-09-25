@@ -4,12 +4,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::profile::{Strength, Tier};
 
 /// One hard requirement; a model failing any is never selected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HardNeed {
     Vision,
     Tools,
@@ -118,6 +119,13 @@ impl RequirementsBuilder {
         self
     }
 
+    /// Sets the soft tier, e.g. from the classifier's answer. Call after
+    /// [`task`](Self::task), which resets the soft preferences.
+    pub fn tier(mut self, tier: Tier) -> Self {
+        self.req.soft.tier = Some(tier);
+        self
+    }
+
     pub fn build(self) -> Requirements {
         self.req
     }
@@ -177,18 +185,52 @@ impl TaskKind {
     }
 }
 
+/// Built-in names parse to their variants; anything else is `Custom`. The
+/// parser therefore never produces `Custom("chat")` and the like.
+impl std::str::FromStr for TaskKind {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "chat" => TaskKind::Chat,
+            "code_edit" => TaskKind::CodeEdit,
+            "plan" => TaskKind::Plan,
+            "judge" => TaskKind::Judge,
+            "summarize" => TaskKind::Summarize,
+            "compact" => TaskKind::Compact,
+            "classify" => TaskKind::Classify,
+            "embed" => TaskKind::Embed,
+            other => TaskKind::Custom(other.to_owned()),
+        })
+    }
+}
+
+/// Serialized as its [`name`](TaskKind::name).
+impl Serialize for TaskKind {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.name())
+    }
+}
+
+impl<'de> Deserialize<'de> for TaskKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(s.parse().unwrap_or_else(|never| match never {}))
+    }
+}
+
 /// One `[routing.tasks]` entry. Unset fields keep the task's default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskOverride {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strengths: Option<BTreeSet<Strength>>,
 }
 
 /// The `[routing.tasks]` table, keyed by [`TaskKind::name`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TaskOverrides(pub BTreeMap<String, TaskOverride>);
 
@@ -362,5 +404,51 @@ mod tests {
             Some(BTreeSet::from([Strength::Code]))
         );
         assert!(toml::from_str::<TaskOverrides>("x = { teir = \"small\" }").is_err());
+    }
+
+    #[test]
+    fn task_kind_parses_builtin_names_and_falls_back_to_custom() {
+        for k in [
+            TaskKind::Chat,
+            TaskKind::CodeEdit,
+            TaskKind::Plan,
+            TaskKind::Judge,
+            TaskKind::Summarize,
+            TaskKind::Compact,
+            TaskKind::Classify,
+            TaskKind::Embed,
+        ] {
+            assert_eq!(k.name().parse::<TaskKind>(), Ok(k.clone()), "{k:?}");
+        }
+        assert_eq!(
+            "reviewer".parse::<TaskKind>(),
+            Ok(TaskKind::Custom("reviewer".into()))
+        );
+    }
+
+    #[test]
+    fn task_kind_serializes_as_its_name() {
+        assert_eq!(
+            serde_json::to_string(&TaskKind::CodeEdit).unwrap(),
+            "\"code_edit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TaskKind::Custom("reviewer".into())).unwrap(),
+            "\"reviewer\""
+        );
+        let k: TaskKind = serde_json::from_str("\"plan\"").unwrap();
+        assert_eq!(k, TaskKind::Plan);
+        let k: TaskKind = serde_json::from_str("\"reviewer\"").unwrap();
+        assert_eq!(k, TaskKind::Custom("reviewer".into()));
+    }
+
+    #[test]
+    fn builder_tier_overrides_the_task_tier() {
+        let r = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .tier(Tier::Large)
+            .build();
+        assert_eq!(r.soft.tier, Some(Tier::Large));
+        assert_eq!(r.soft.strengths, BTreeSet::from([Strength::Chat]));
     }
 }

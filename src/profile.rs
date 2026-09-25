@@ -107,7 +107,8 @@ pub enum Locality {
 }
 
 /// Whether the model can currently be routed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Availability {
     /// Seen by discovery.
     Available,
@@ -155,14 +156,14 @@ impl fmt::Display for ModelKey {
 }
 
 /// Where a profile's facts came from, for `explain`-style output.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ProfileSource {
     pub discovered: bool,
     pub in_roster: bool,
 }
 
 /// One candidate model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModelProfile {
     pub id: String,
     pub endpoint: EndpointRef,
