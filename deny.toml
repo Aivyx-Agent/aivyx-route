@@ -1,0 +1,53 @@
+# cargo-deny configuration — dependency license policy.
+#
+# Run: `cargo deny check licenses`
+#
+# aivyx-route is licensed BUSL-1.1 from its first commit (see LICENSE).
+# For that to be lawful, NO dependency may impose copyleft (GPL/
+# LGPL-only/AGPL/MPL/SSPL/EPL/CDDL) on the combined work. This
+# allow-list is therefore permissive-only and deliberately omits every
+# copyleft license: cargo-deny rejects anything not listed, so a future
+# copyleft dep fails the gate loudly.
+#
+# The list matches the org-wide allow-list every Aivyx-Agent repo's
+# deny.toml carries (established by aivyx-pa's own relicense audit) —
+# reused rather than redrafted so every repo applies the identical policy.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+# Skip this crate itself: it is BUSL-1.1 by design and marked
+# publish = false, which is what private.ignore keys off. A THIRD-PARTY
+# crate under BUSL/any copyleft still fails loudly, which is the point.
+private = { ignore = true }
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "BSL-1.0",
+    "0BSD",
+    "Unlicense",
+    "WTFPL",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
+    "NCSA",
+    # MPL-2.0 is *file-level* (weak) copyleft: it never relicenses the
+    # larger combined work -- the only obligation is to share
+    # modifications to the MPL-licensed files themselves. Kept for
+    # consistency with the org-wide policy. Whether any dependency in this
+    # repo's graph actually uses it is recorded here by the final task of
+    # the implementation plan, after the `discovery` feature's HTTP stack
+    # is added.
+    "MPL-2.0",
+]
+
+# No per-crate license exceptions.
