@@ -34,6 +34,15 @@ Decisions confirmed with the operator during brainstorming (2026-09-25):
 | 6 | Routing granularity | **Per call, sticky within a conversation**: main thread stays put unless a hard need forces a switch; side calls route freely |
 | 7 | Architecture | **Shared crate `aivyx-route`**, thin per-product routing layers; `aivyx-broker` later becomes a residency-signal source for D |
 
+Further decisions from the Part 1 final review (2026-09-26), folded into
+the sections below:
+
+| # | Decision | Choice |
+|---|---|---|
+| 8 | Capabilities a discovery source can't report | **Unknown, not absent**: an unknown capability passes a hard need but ranks below every model known to have it, and the reason says "assumed but unverified" |
+| 9 | Endpoint names not declared anywhere | **Fail closed**: treated as `Cloud` + `Unavailable` (a typo must never make a cloud model look local); `RoutingConfig::validate()` reports it |
+| 10 | Model identity | **`ModelKey` = (endpoint, id)**: the same id on two endpoints is two models; `Policy` stickiness/exclusion use keys, not bare ids |
+
 ## Grounding
 
 Verified directly against the code and upstream docs before writing this
@@ -102,8 +111,12 @@ parser (Part 1); `aivyx-pa` wires it (Part 3). `aivyx-coder` never uses it.
 ### Core types
 
 - **`ModelProfile`** — one candidate:
-  - `id: String`, `endpoint: EndpointRef`, `locality: Local | Cloud`
-  - `capabilities: CapabilitySet` over `Tools | Vision | Thinking | Audio | Embedding`
+  - `id: String`, `endpoint: EndpointRef`, `locality: Local | Cloud`;
+    identified by `ModelKey { endpoint, id }` (`Display` as `id@endpoint`,
+    via `ModelProfile::key()`)
+  - `capabilities: CapabilitySet` over `Completion | Tools | Vision | Thinking | Audio | Embedding`
+  - `unknown_capabilities: CapabilitySet` — capabilities whose presence
+    discovery couldn't determine (empty for explicitly-built profiles)
   - `context_window: Option<u32>`
   - `tier: Small | Medium | Large`
   - `strengths: Set<Code | Reasoning | Chat | Summarize>`
@@ -129,29 +142,46 @@ parser (Part 1); `aivyx-pa` wires it (Part 3). `aivyx-coder` never uses it.
   | `Embed` | — (requires `Embedding` capability) | — |
   | `Custom(_)` | Medium | — (unless overridden) |
 
-- **`Policy`** — `sticky_model: Option<String>` (the conversation's current
-  model, for stickiness), `allow_cloud: bool`, `exclude: Vec<String>`. The
-  crate enforces; each product decides the values.
+- **`Policy`** — `sticky_model: Option<ModelKey>` (the conversation's
+  current model, for stickiness), `allow_cloud: bool`,
+  `exclude: Vec<ModelKey>`. The crate enforces; each product decides the
+  values.
 - **`select(&Requirements, &[ModelProfile], &Policy) -> Result<Decision, NoCandidate>`**
   — pure and deterministic:
   1. Drop `Unavailable`, `exclude`d, and (unless `allow_cloud`) `Cloud`
      profiles.
-  2. Drop every profile failing any hard requirement. A profile whose
+  2. Drop every profile failing any hard requirement. A capability need is
+     met if the capability is present **or unknown**. A profile whose
      `context_window` is unknown (neither discovered nor in the roster)
-     *passes* the `min_context` filter, but in step 4 ranks below every
-     profile with a known, sufficient window.
+     *passes* the `min_context` filter. Both kinds of "passed on unknown"
+     rank lower in step 4.
   3. If `sticky_model` survives step 2, return it (reason: "sticky").
-  4. Otherwise score survivors: tier fit (exact = best; one step off =
-     penalty; larger-than-needed penalised less than smaller-than-needed),
-     strength overlap, then `priority`, then `id` lexical order as the
+  4. Otherwise score survivors: first, profiles meeting a capability need
+     only via `unknown_capabilities` rank below every profile known to
+     have it; then unknown-context-window profiles below known, sufficient
+     ones; then tier fit (exact = best; one step off = penalty;
+     larger-than-needed penalised less than smaller-than-needed), strength
+     overlap, then `priority`, then endpoint and `id` lexical order as the
      final deterministic tie-break. (Part 4 adds `ResidencyCost`.)
   5. Return `Decision { model, fallbacks (rest, ranked), reason }`.
 - **`Decision.reason`** — structured (`Vec<ReasonPart>`) with a `Display`
   impl producing one human sentence, e.g. *"vision required;
-  `llava:13b` is the only vision-capable local model."*
+  `llava:13b` is the only vision-capable local model."* A choice that
+  relies on unknown capabilities adds *"assumed but unverified: tools"*;
+  the unknown-context-window note appears only when the model was chosen
+  by ranking, not kept by stickiness.
 - **`NoCandidate`** — carries the list of unmet hard requirements (and,
   per requirement, the closest near-miss) so errors can say exactly what's
-  missing. `aivyx-pa` uses it as escalation trigger 1.
+  missing. With zero candidates at all, every hard need is still listed
+  (no near-miss) and the message reads *"no candidate models are
+  available (needed: vision, tool calling)"*. `aivyx-pa` uses it as
+  escalation trigger 1.
+- **Consumer helpers** — `unmet_needs(&Requirements, &ModelProfile)` (the
+  needs a profile definitely fails, same unknown-passes rule as `select`)
+  and `find(&[ModelProfile], &ModelKey)`, used to validate explicit
+  operator pins. Config and output types are `Serialize` (both products
+  write config back / emit decisions as JSON), and `TaskKind` round-trips
+  as its string name (`FromStr` never yields `Custom` for a built-in name).
 
 ### Requirement extraction
 
@@ -175,10 +205,18 @@ backend family, each returning partial `ModelProfile`s:
 
 | Backend | Endpoint(s) | Yields |
 |---|---|---|
-| Ollama | `/api/tags`, then `/api/show` per model | ids, `capabilities[]`, `context_length` |
-| llama.cpp router mode | `GET /models` | ids, `input_modalities` (image ⇒ `Vision`), load status |
-| llama.cpp single mode / Jan / generic OpenAI-compat | `GET /v1/models` | ids only |
-| Cloud (Anthropic / OpenAI) | none | roster only — never probed |
+| Backend | Endpoint(s) | Yields | Unknown capabilities |
+|---|---|---|---|
+| Ollama | `/api/tags`, then `/api/show` per model | ids, `capabilities[]`, `context_length` | none (all six if `/api/show` fails) |
+| llama.cpp router mode | `GET /models` | ids, `input_modalities` (image ⇒ `Vision`), load status | completion, tools, thinking, embedding |
+| llama.cpp single mode / Jan / generic OpenAI-compat | `GET /v1/models` | ids only | all six |
+| Cloud (Anthropic / OpenAI) | none | roster only — never probed | all six until the roster declares them |
+
+Ollama's `context_length` is the model's *trained* length, not the served
+`num_ctx`; operators should set roster `context_window` to the serving
+value (Part 4 reads the served value from `/api/ps`). The discovery module
+re-exports `reqwest` so consumers on a different `reqwest` major (aivyx-pa
+is on 0.12) can build a compatible client.
 
 Discovery runs at startup and on explicit refresh only — never per call.
 Results are cached with a timestamp. An unreachable endpoint marks its
@@ -223,6 +261,23 @@ summarize = { tier = "small" }
 - A roster model discovery didn't find is kept, marked `Unverified` (keeps
   cloud models and single-mode llama.cpp working); if chosen and it fails,
   the fallback chain handles it.
+- Unknown capabilities: from discovery (see the Discovery table); a
+  roster-only model starts with all six unknown. Every roster
+  `capabilities` and `capabilities_deny` entry makes that capability
+  known (present or absent). `capabilities_deny` removes from discovered
+  **and** declared capabilities; a deny from any duplicate entry wins.
+- Duplicate roster entries for the same (endpoint, id) apply in order,
+  each overriding only the fields it sets.
+- Endpoint locality: `merge` takes the product's `DefaultEndpoint { name,
+  kind }`. The default name resolves to its kind's locality (so an
+  aivyx-pa default of Anthropic is `Cloud`); a `[routing.endpoints]` key
+  to its kind's; **any other name fails closed** — `Cloud` and
+  `Unavailable`, never selected. An explicit roster `locality` still
+  overrides locality (not availability).
+- `RoutingConfig::validate(&DefaultEndpoint) -> Vec<ConfigIssue>` (pure,
+  deterministic order) reports `UnknownEndpoint`, `DuplicateModel`, and
+  `MissingBaseUrl` (a local kind with no `base_url`) so products can warn
+  at startup.
 
 ### Classifier helpers
 
@@ -262,7 +317,7 @@ keep today's behavior.
 
 ### Stickiness
 
-The routing layer keeps a `session → current model` map (`aivyx-coder`:
+The routing layer keeps a `session → current ModelKey` map (`aivyx-coder`:
 session; `aivyx-pa`: conversation/channel thread). `Chat` and `CodeEdit`
 calls pass it as `Policy.sticky_model`; if it fails a hard requirement,
 `select()` re-picks, the map updates (new model sticks), and the reason is
