@@ -19,6 +19,31 @@ pub enum Capability {
     Embedding,
 }
 
+impl Capability {
+    /// Every capability, in declaration order.
+    pub const ALL: [Capability; 6] = [
+        Capability::Completion,
+        Capability::Tools,
+        Capability::Vision,
+        Capability::Thinking,
+        Capability::Audio,
+        Capability::Embedding,
+    ];
+}
+
+impl fmt::Display for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Capability::Completion => "completion",
+            Capability::Tools => "tools",
+            Capability::Vision => "vision",
+            Capability::Thinking => "thinking",
+            Capability::Audio => "audio",
+            Capability::Embedding => "embedding",
+        })
+    }
+}
+
 pub type CapabilitySet = BTreeSet<Capability>;
 
 /// Coarse size/quality class. Operator-declared; discovery cannot know it.
@@ -130,6 +155,9 @@ pub struct ModelProfile {
     pub endpoint: EndpointRef,
     pub locality: Locality,
     pub capabilities: CapabilitySet,
+    /// Capabilities whose presence is unknown (the source couldn't say).
+    /// A hard need is met by one of these, but ranks below a known match.
+    pub unknown_capabilities: CapabilitySet,
     /// `None` = unknown (neither discovered nor declared).
     pub context_window: Option<u32>,
     pub tier: Tier,
@@ -147,6 +175,7 @@ impl ModelProfile {
             endpoint,
             locality: Locality::Local,
             capabilities: CapabilitySet::new(),
+            unknown_capabilities: CapabilitySet::new(),
             context_window: None,
             tier: Tier::Medium,
             strengths: BTreeSet::new(),
@@ -194,6 +223,28 @@ mod tests {
         assert!(
             !unknown.is_embedding_only(),
             "a model with no capability info must not look embedding-only"
+        );
+    }
+
+    #[test]
+    fn new_profile_has_no_unknown_capabilities() {
+        let p = ModelProfile::new("m", EndpointRef::new("e"));
+        assert!(p.unknown_capabilities.is_empty());
+    }
+
+    #[test]
+    fn capability_displays_lowercase_and_all_lists_six() {
+        let names: Vec<String> = Capability::ALL.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            names,
+            vec![
+                "completion",
+                "tools",
+                "vision",
+                "thinking",
+                "audio",
+                "embedding"
+            ]
         );
     }
 

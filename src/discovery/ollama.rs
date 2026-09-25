@@ -40,16 +40,19 @@ pub(super) async fn discover(
         .await?;
     let mut out = Vec::with_capacity(tags.models.len());
     for entry in tags.models {
-        // A failed /api/show still leaves a usable (capability-less) model.
+        // A failed /api/show still leaves a usable model whose capabilities
+        // are all unknown.
         let model = match show(base, &entry.name, client).await {
             Ok(show) => DiscoveredModel {
                 capabilities: parse_capabilities(&show.capabilities),
+                unknown_capabilities: CapabilitySet::new(),
                 context_window: context_length(&show.model_info),
                 id: entry.name,
             },
             Err(_) => DiscoveredModel {
                 id: entry.name,
                 capabilities: CapabilitySet::new(),
+                unknown_capabilities: Capability::ALL.into_iter().collect(),
                 context_window: None,
             },
         };
@@ -149,6 +152,10 @@ mod tests {
             get("nomic-embed-text:latest").capabilities,
             CapabilitySet::from([Capability::Embedding])
         );
+        assert!(
+            models.iter().all(|m| m.unknown_capabilities.is_empty()),
+            "a successful /api/show is authoritative"
+        );
     }
 
     #[tokio::test]
@@ -166,6 +173,10 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "mystery:1b");
         assert!(models[0].capabilities.is_empty());
+        assert_eq!(
+            models[0].unknown_capabilities,
+            Capability::ALL.into_iter().collect::<CapabilitySet>()
+        );
         assert_eq!(models[0].context_window, None);
     }
 

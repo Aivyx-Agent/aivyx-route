@@ -4,7 +4,9 @@
 use std::cmp::Reverse;
 use std::fmt;
 
-use crate::profile::{Availability, Capability, Locality, ModelProfile, Strength, Tier};
+use crate::profile::{
+    Availability, Capability, CapabilitySet, Locality, ModelProfile, Strength, Tier,
+};
 use crate::requirements::{HardNeed, Requirements};
 
 /// Constraints the product imposes on this call.
@@ -24,10 +26,15 @@ pub enum ReasonPart {
     Required(HardNeed),
     Sticky,
     OnlyCandidate,
-    TierFit { wanted: Tier, got: Tier },
+    TierFit {
+        wanted: Tier,
+        got: Tier,
+    },
     Strengths(Vec<Strength>),
     Priority(i32),
     UnknownContextWindow,
+    /// Hard needs met only because the capability's presence is unknown.
+    UnverifiedCapabilities(Vec<Capability>),
 }
 
 impl fmt::Display for ReasonPart {
@@ -50,6 +57,10 @@ impl fmt::Display for ReasonPart {
             ReasonPart::UnknownContextWindow => f.write_str(
                 "context window unknown; no model with a known, large-enough window qualified",
             ),
+            ReasonPart::UnverifiedCapabilities(caps) => {
+                let names: Vec<String> = caps.iter().map(ToString::to_string).collect();
+                write!(f, "assumed but unverified: {}", names.join(", "))
+            }
         }
     }
 }
@@ -152,6 +163,10 @@ pub fn select(
     if req.hard.min_context.is_some() && model.context_window.is_none() {
         reason.push(ReasonPart::UnknownContextWindow);
     }
+    let assumed = assumed_capabilities(model, &needs);
+    if !assumed.is_empty() {
+        reason.push(ReasonPart::UnverifiedCapabilities(assumed));
+    }
     Ok(Decision {
         model: model.clone(),
         fallbacks: ranked.into_iter().cloned().collect(),
@@ -166,14 +181,36 @@ fn is_eligible(p: &ModelProfile, req: &Requirements, policy: &Policy) -> bool {
         && (req.hard.embedding || !p.is_embedding_only())
 }
 
-fn satisfies(p: &ModelProfile, need: HardNeed) -> bool {
+/// The capability a hard need asks for, if it is a capability need.
+fn capability_for(need: HardNeed) -> Option<Capability> {
     match need {
-        HardNeed::Vision => p.capabilities.contains(&Capability::Vision),
-        HardNeed::Tools => p.capabilities.contains(&Capability::Tools),
-        HardNeed::Audio => p.capabilities.contains(&Capability::Audio),
-        HardNeed::Embedding => p.capabilities.contains(&Capability::Embedding),
-        HardNeed::Context(min) => p.context_window.is_none_or(|w| w >= min),
+        HardNeed::Vision => Some(Capability::Vision),
+        HardNeed::Tools => Some(Capability::Tools),
+        HardNeed::Audio => Some(Capability::Audio),
+        HardNeed::Embedding => Some(Capability::Embedding),
+        HardNeed::Context(_) => None,
     }
+}
+
+/// Unknown capabilities and an unknown context window count as met.
+fn satisfies(p: &ModelProfile, need: HardNeed) -> bool {
+    match (need, capability_for(need)) {
+        (HardNeed::Context(min), _) => p.context_window.is_none_or(|w| w >= min),
+        (_, cap) => {
+            cap.is_some_and(|c| p.capabilities.contains(&c) || p.unknown_capabilities.contains(&c))
+        }
+    }
+}
+
+/// Capabilities among `needs` that `p` meets only via `unknown_capabilities`,
+/// in `Capability` order.
+fn assumed_capabilities(p: &ModelProfile, needs: &[HardNeed]) -> Vec<Capability> {
+    let assumed: CapabilitySet = needs
+        .iter()
+        .filter_map(|n| capability_for(*n))
+        .filter(|c| !p.capabilities.contains(c) && p.unknown_capabilities.contains(c))
+        .collect();
+    assumed.into_iter().collect()
 }
 
 fn tier_penalty(wanted: Option<Tier>, got: Tier) -> u8 {
@@ -189,12 +226,14 @@ fn tier_penalty(wanted: Option<Tier>, got: Tier) -> u8 {
     }
 }
 
-type RankKey = (bool, u8, Reverse<usize>, Reverse<i32>, String);
+type RankKey = (bool, bool, u8, Reverse<usize>, Reverse<i32>, String);
 
 fn rank_key(p: &ModelProfile, req: &Requirements) -> RankKey {
+    let relies_on_unknown_caps = !assumed_capabilities(p, &req.hard.needs()).is_empty();
     let unknown_ctx = req.hard.min_context.is_some() && p.context_window.is_none();
     let overlap = p.strengths.intersection(&req.soft.strengths).count();
     (
+        relies_on_unknown_caps,
         unknown_ctx,
         tier_penalty(req.soft.tier, p.tier),
         Reverse(overlap),
@@ -590,6 +629,85 @@ mod tests {
         assert_eq!(
             d.to_string(),
             "chose `v`: vision required; only model meeting the hard requirements"
+        );
+    }
+
+    fn with_unknown(mut p: ModelProfile, caps: &[Capability]) -> ModelProfile {
+        p.unknown_capabilities.extend(caps.iter().copied());
+        p
+    }
+
+    #[test]
+    fn unknown_capability_passes_a_hard_need_and_says_so() {
+        let req = for_task(TaskKind::Chat).tools().vision().build();
+        let c = [with_unknown(
+            m("compat", Tier::Medium),
+            &[Capability::Tools, Capability::Vision],
+        )];
+        let d = select(&req, &c, &Policy::default()).unwrap();
+        assert_eq!(d.model.id, "compat");
+        assert!(d.reason.contains(&ReasonPart::UnverifiedCapabilities(vec![
+            Capability::Tools,
+            Capability::Vision
+        ])));
+        assert!(
+            d.to_string()
+                .contains("assumed but unverified: tools, vision"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn known_capability_outranks_unknown_even_at_a_worse_tier() {
+        let req = for_task(TaskKind::Chat).tools().build(); // wants Medium
+        let assumed = with_unknown(m("assumed", Tier::Medium), &[Capability::Tools]);
+        let known = with_caps(m("known", Tier::Small), &[Capability::Tools]);
+        let d = select(&req, &[assumed, known], &Policy::default()).unwrap();
+        assert_eq!(d.model.id, "known");
+        assert_eq!(fallback_ids(&d), vec!["assumed"]);
+        assert!(
+            !d.reason
+                .iter()
+                .any(|r| matches!(r, ReasonPart::UnverifiedCapabilities(_)))
+        );
+    }
+
+    #[test]
+    fn unknown_other_capabilities_do_not_satisfy_vision() {
+        // llama router, text-only modalities: vision is known absent.
+        let req = for_task(TaskKind::Chat).vision().build();
+        let router = with_unknown(
+            m("router", Tier::Medium),
+            &[
+                Capability::Completion,
+                Capability::Tools,
+                Capability::Thinking,
+                Capability::Embedding,
+            ],
+        );
+        let err = select(&req, &[router], &Policy::default()).unwrap_err();
+        assert_eq!(err.unmet[0].need, HardNeed::Vision);
+    }
+
+    #[test]
+    fn near_miss_logic_counts_unknown_as_met() {
+        // `assumed` meets tools only via unknown, so it is the near-miss
+        // for vision (it would be none if unknown counted as absent).
+        let req = for_task(TaskKind::Chat).tools().vision().build();
+        let assumed = with_unknown(m("assumed", Tier::Medium), &[Capability::Tools]);
+        let err = select(&req, &[assumed], &Policy::default()).unwrap_err();
+        assert_eq!(
+            err.unmet,
+            vec![
+                Unmet {
+                    need: HardNeed::Vision,
+                    near_miss: Some("assumed".into())
+                },
+                Unmet {
+                    need: HardNeed::Tools,
+                    near_miss: None
+                },
+            ]
         );
     }
 

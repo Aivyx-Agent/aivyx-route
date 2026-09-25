@@ -3,13 +3,17 @@
 use std::collections::BTreeMap;
 
 use crate::config::RoutingConfig;
-use crate::profile::{Availability, CapabilitySet, EndpointRef, Locality, ModelProfile};
+use crate::profile::{
+    Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile,
+};
 
 /// What one backend said about one model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveredModel {
     pub id: String,
     pub capabilities: CapabilitySet,
+    /// Capabilities this source cannot report on.
+    pub unknown_capabilities: CapabilitySet,
     pub context_window: Option<u32>,
 }
 
@@ -59,6 +63,7 @@ pub fn merge(
                 let mut p = ModelProfile::new(d.id.clone(), report.endpoint.clone());
                 p.locality = endpoint_locality(&report.endpoint);
                 p.capabilities = d.capabilities.clone();
+                p.unknown_capabilities = d.unknown_capabilities.clone();
                 p.context_window = d.context_window;
                 p.source.discovered = true;
                 profiles.insert((report.endpoint.clone(), d.id.clone()), p);
@@ -86,6 +91,7 @@ pub fn merge(
         let p = profiles.entry(key).or_insert_with(|| {
             let mut p = ModelProfile::new(entry.id.clone(), ep.clone());
             p.locality = endpoint_locality(&ep);
+            p.unknown_capabilities = Capability::ALL.into_iter().collect();
             p.availability = match outcome_of(&ep) {
                 Some(DiscoveryOutcome::Unreachable(_)) => Availability::Unavailable,
                 _ => Availability::Unverified,
@@ -93,6 +99,8 @@ pub fn merge(
             p
         });
         p.capabilities.extend(entry.capabilities.iter().copied());
+        p.unknown_capabilities
+            .retain(|c| !entry.capabilities.contains(c) && !entry.capabilities_deny.contains(c));
         if entry.context_window.is_some() {
             p.context_window = entry.context_window;
         }
@@ -121,7 +129,7 @@ pub fn merge(
 mod tests {
     use super::*;
     use crate::config::{EndpointConfig, EndpointKind, RosterEntry};
-    use crate::profile::{Capability, ProfileSource, Strength, Tier};
+    use crate::profile::{ProfileSource, Strength, Tier};
     use std::collections::BTreeSet;
 
     fn ep(name: &str) -> EndpointRef {
@@ -132,7 +140,18 @@ mod tests {
         DiscoveredModel {
             id: id.into(),
             capabilities: caps.iter().copied().collect(),
+            unknown_capabilities: CapabilitySet::new(),
             context_window: ctx,
+        }
+    }
+
+    /// An OpenAI-compat style discovery: nothing known.
+    fn found_blind(id: &str) -> DiscoveredModel {
+        DiscoveredModel {
+            id: id.into(),
+            capabilities: CapabilitySet::new(),
+            unknown_capabilities: Capability::ALL.into_iter().collect(),
+            context_window: None,
         }
     }
 
@@ -377,5 +396,61 @@ mod tests {
         }];
         let ps = merge(&config_with(vec![entry("m")]), &ep("main"), &reports);
         assert_eq!(find(&ps, "m").availability, Availability::Unverified);
+    }
+
+    #[test]
+    fn discovered_unknown_capabilities_are_carried_over() {
+        let reports = [reached("main", vec![found_blind("compat")])];
+        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        assert_eq!(
+            find(&ps, "compat").unknown_capabilities,
+            Capability::ALL.into_iter().collect::<CapabilitySet>()
+        );
+    }
+
+    #[test]
+    fn roster_only_models_start_with_every_capability_unknown() {
+        let ps = merge(&config_with(vec![entry("ghost")]), &ep("main"), &[]);
+        assert_eq!(
+            find(&ps, "ghost").unknown_capabilities,
+            Capability::ALL.into_iter().collect::<CapabilitySet>()
+        );
+    }
+
+    #[test]
+    fn roster_declarations_and_denies_make_capabilities_known() {
+        let mut e = entry("compat");
+        e.capabilities = CapabilitySet::from([Capability::Tools]);
+        e.capabilities_deny = CapabilitySet::from([Capability::Vision]);
+        let reports = [reached("main", vec![found_blind("compat")])];
+        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let p = find(&ps, "compat");
+        assert_eq!(p.capabilities, CapabilitySet::from([Capability::Tools]));
+        assert_eq!(
+            p.unknown_capabilities,
+            CapabilitySet::from([
+                Capability::Completion,
+                Capability::Thinking,
+                Capability::Audio,
+                Capability::Embedding
+            ])
+        );
+    }
+
+    #[test]
+    fn denying_an_unknown_capability_makes_a_request_needing_it_fail() {
+        use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+        use crate::select::{Policy, select};
+        let mut e = entry("compat");
+        e.capabilities_deny = CapabilitySet::from([Capability::Tools]);
+        let reports = [reached("main", vec![found_blind("compat")])];
+        let ps = merge(&config_with(vec![e]), &ep("main"), &reports);
+        let req = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .tools()
+            .build();
+        assert!(select(&req, &ps, &Policy::default()).is_err());
+        let ps = merge(&RoutingConfig::default(), &ep("main"), &reports);
+        assert!(select(&req, &ps, &Policy::default()).is_ok());
     }
 }

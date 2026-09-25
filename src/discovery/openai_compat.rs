@@ -1,10 +1,11 @@
-//! Generic OpenAI-compatible servers: `GET /v1/models` yields ids only.
+//! Generic OpenAI-compatible servers: `GET /v1/models` yields ids only, so
+//! every capability is unknown.
 
 use serde::Deserialize;
 
 use super::REQUEST_TIMEOUT;
 use crate::merge::DiscoveredModel;
-use crate::profile::CapabilitySet;
+use crate::profile::{Capability, CapabilitySet};
 
 #[derive(Deserialize)]
 struct Models {
@@ -44,6 +45,7 @@ pub(super) async fn discover(
         .map(|entry| DiscoveredModel {
             id: entry.id,
             capabilities: CapabilitySet::new(),
+            unknown_capabilities: Capability::ALL.into_iter().collect(),
             context_window: None,
         })
         .collect())
@@ -77,6 +79,10 @@ mod tests {
             assert_eq!(models.len(), 1, "{base}");
             assert_eq!(models[0].id, "qwen3-8b-q4_k_m.gguf");
             assert!(models[0].capabilities.is_empty());
+            assert_eq!(
+                models[0].unknown_capabilities,
+                Capability::ALL.into_iter().collect::<CapabilitySet>()
+            );
         }
     }
 }
