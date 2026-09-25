@@ -43,10 +43,9 @@ allow = [
     # MPL-2.0 is *file-level* (weak) copyleft: it never relicenses the
     # larger combined work -- the only obligation is to share
     # modifications to the MPL-licensed files themselves. Kept for
-    # consistency with the org-wide policy. Whether any dependency in this
-    # repo's graph actually uses it is recorded here by the final task of
-    # the implementation plan, after the `discovery` feature's HTTP stack
-    # is added.
+    # consistency with the org-wide policy. No dependency in this repo's
+    # all-features graph is MPL-2.0 today -- verified with `cargo deny
+    # list`; cargo-deny may report it as an unmatched allowance.
     "MPL-2.0",
 ]
 
