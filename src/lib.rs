@@ -5,8 +5,13 @@
 //! `docs/superpowers/specs/2026-09-25-model-routing-design.md`.
 
 pub mod profile;
+pub mod requirements;
 
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile, ProfileSource,
     Strength, Tier,
+};
+pub use requirements::{
+    HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
+    TaskOverride, TaskOverrides,
 };
