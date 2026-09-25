@@ -4,6 +4,7 @@
 //! request needs, and ask for a deterministic choice. See
 //! `docs/superpowers/specs/2026-09-25-model-routing-design.md`.
 
+pub mod classifier;
 pub mod config;
 pub mod merge;
 pub mod profile;
