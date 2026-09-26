@@ -403,13 +403,20 @@ mod tests {
 
     #[test]
     fn an_already_listed_bare_name_is_left_alone() {
-        let own = ModelResidency::NotLoaded { size_bytes: Some(1) };
-        let latest = ModelResidency::Loaded { vram_bytes: Some(7) };
+        let own = ModelResidency::NotLoaded {
+            size_bytes: Some(1),
+        };
+        let latest = ModelResidency::Loaded {
+            vram_bytes: Some(7),
+        };
         let got = with_untagged_aliases(vec![
             ("m".to_string(), own),
             ("m:latest".to_string(), latest),
         ]);
-        assert_eq!(got, vec![("m".to_string(), own), ("m:latest".to_string(), latest)]);
+        assert_eq!(
+            got,
+            vec![("m".to_string(), own), ("m:latest".to_string(), latest)]
+        );
     }
 
     #[tokio::test]
