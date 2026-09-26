@@ -176,7 +176,33 @@ async fn ollama(
             out.push((model.name, residency));
         }
     }
-    Ok(out)
+    Ok(with_untagged_aliases(out))
+}
+
+/// Ollama reports a tagless model as `name:latest`, but operators often
+/// write the bare `name` (it's what `ollama run` accepts), so each
+/// `name:latest` also answers to `name` unless that id is already listed.
+/// A loaded alias carries no `vram_bytes`: it's the same model, and its
+/// VRAM is already counted once (as evictable) on the `:latest` entry.
+fn with_untagged_aliases(
+    mut models: Vec<(String, ModelResidency)>,
+) -> Vec<(String, ModelResidency)> {
+    let aliases: Vec<(String, ModelResidency)> = models
+        .iter()
+        .filter_map(|(id, residency)| {
+            let untagged = id.strip_suffix(":latest")?;
+            if models.iter().any(|(other, _)| other == untagged) {
+                return None;
+            }
+            let residency = match residency {
+                ModelResidency::Loaded { .. } => ModelResidency::Loaded { vram_bytes: None },
+                not_loaded => *not_loaded,
+            };
+            Some((untagged.to_string(), residency))
+        })
+        .collect();
+    models.extend(aliases);
+    models
 }
 
 #[derive(Deserialize)]
@@ -327,6 +353,52 @@ mod tests {
             }
         );
         assert_eq!(snap.vram, None);
+    }
+
+    /// Ollama reports a tagless model as `name:latest`, while operators
+    /// often write `name` (in `[backend] model`, `[agent] model` or a
+    /// roster entry). Both keys must resolve, and the VRAM counts once.
+    #[tokio::test]
+    async fn ollama_latest_models_also_answer_to_their_untagged_name() {
+        let server = serve(
+            "/api/ps",
+            r#"{"models":[{"name":"llama3.2:latest","size":2000000000,"size_vram":2000000000}]}"#,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(json_response(
+                r#"{"models":[{"name":"llama3.2:latest","size":2000000000},{"name":"phi4:latest","size":9000000000},{"name":"qwen3:8b","size":5000000000}]}"#,
+            ))
+            .mount(&server)
+            .await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("ollama"),
+                endpoint(EndpointKind::Ollama, &server.uri()),
+            )],
+            None,
+            Some(24 << 30),
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("ollama", "llama3.2")],
+            ModelResidency::Loaded { vram_bytes: None },
+            "the alias carries no VRAM of its own"
+        );
+        assert_eq!(
+            snap.models[&key("ollama", "phi4")],
+            ModelResidency::NotLoaded {
+                size_bytes: Some(9_000_000_000)
+            }
+        );
+        assert!(
+            !snap.models.contains_key(&key("ollama", "qwen3")),
+            "only :latest gets an alias"
+        );
+        // used = what loaded models hold, counted once.
+        assert_eq!(snap.vram.map(|v| v.used_bytes), Some(2_000_000_000));
     }
 
     #[tokio::test]

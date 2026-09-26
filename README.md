@@ -156,6 +156,10 @@ the total only when nothing else reports one. `collect` is meant to be
 polled on a short TTL (5s), never per request — like discovery, it's I/O,
 so it stays behind the `discovery` feature.
 
+Ollama reports a tagless model as `name:latest`; each such entry also
+answers to the bare `name` (what `ollama run` accepts and operators often
+configure), with its VRAM counted once.
+
 A snapshot's `resident_endpoints` marks single-model servers: a model with
 no entry of its own on such an endpoint counts as loaded, whatever the
 product calls it (a per-model entry still wins). `collect` sets it for a
