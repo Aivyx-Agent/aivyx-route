@@ -102,6 +102,8 @@ struct State {
     /// Model → when its cooldown (from a retryable failure) expires.
     cooling: HashMap<ModelKey, Instant>,
     last: HashMap<String, RouteRecord>,
+    /// The latest residency snapshot; empty until a product sets one.
+    residency: ResidencySnapshot,
 }
 
 impl Router {
@@ -138,6 +140,17 @@ impl Router {
         let mut state = self.state.lock().unwrap();
         state.profiles = profiles;
         state.cooling.clear();
+    }
+
+    /// Replaces the residency snapshot `plan` scores with (products refresh
+    /// it on a short TTL, never per call).
+    pub fn set_residency(&self, snapshot: ResidencySnapshot) {
+        self.state.lock().unwrap().residency = snapshot;
+    }
+
+    /// The current residency snapshot.
+    pub fn residency(&self) -> ResidencySnapshot {
+        self.state.lock().unwrap().residency.clone()
     }
 
     /// The model `session`'s main thread is on: its pin, else the model
@@ -254,7 +267,7 @@ impl Router {
                 .and_then(|s| state.sticky.get(s).cloned()),
             allow_cloud: self.allow_cloud,
             exclude: Vec::new(),
-            residency: ResidencySnapshot::default(),
+            residency: state.residency.clone(),
         };
         let (decision, retrying_cooled) = match select(&req, &without_cooling, &policy) {
             Ok(decision) => (decision, false),
@@ -316,6 +329,7 @@ impl Router {
 mod tests {
     use super::*;
     use crate::profile::{Capability, EndpointRef, Locality, Tier};
+    use crate::residency::{ModelResidency, ResidencySnapshot};
 
     fn key(endpoint: &str, id: &str) -> ModelKey {
         ModelKey {
@@ -585,5 +599,33 @@ mod tests {
         );
         assert_eq!(r.last_decision("main"), Some(record));
         assert!(r.last_decision("other").is_none());
+    }
+
+    #[test]
+    fn plan_scores_with_the_latest_residency() {
+        let r = router(vec![
+            p("gpu", "a", Tier::Medium, &[]),
+            p("gpu", "b", Tier::Medium, &[]),
+        ]);
+        let t0 = Instant::now();
+        assert_eq!(
+            r.plan(&q(TaskKind::Chat, None), t0).unwrap().chain[0],
+            key("gpu", "a")
+        );
+        let snapshot = ResidencySnapshot {
+            models: [(key("gpu", "b"), ModelResidency::Loaded { vram_bytes: None })].into(),
+            ..ResidencySnapshot::default()
+        };
+        r.set_residency(snapshot.clone());
+        assert_eq!(r.residency(), snapshot);
+        let plan = r.plan(&q(TaskKind::Chat, None), t0).unwrap();
+        assert_eq!(plan.chain[0], key("gpu", "b"));
+        assert!(plan.reason.contains("already loaded"), "{}", plan.reason);
+        // Replacing the snapshot replaces it; an empty one restores the old order.
+        r.set_residency(ResidencySnapshot::default());
+        assert_eq!(
+            r.plan(&q(TaskKind::Chat, None), t0).unwrap().chain[0],
+            key("gpu", "a")
+        );
     }
 }

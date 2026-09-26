@@ -20,6 +20,10 @@ pub struct RoutingConfig {
     pub endpoints: BTreeMap<String, EndpointConfig>,
     pub models: Vec<RosterEntry>,
     pub tasks: TaskOverrides,
+    /// Host GPU memory in bytes, for residency scoring when no
+    /// `aivyx-broker` reports it. `None`: no won't-fit term without a broker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vram_bytes: Option<u64>,
 }
 
 impl Default for RoutingConfig {
@@ -30,6 +34,7 @@ impl Default for RoutingConfig {
             endpoints: BTreeMap::new(),
             models: Vec::new(),
             tasks: TaskOverrides::default(),
+            vram_bytes: None,
         }
     }
 }
@@ -390,5 +395,15 @@ endpoint = "gpu"
         let text = toml::to_string(&Out { routing: &c }).unwrap();
         let back = toml::from_str::<Doc>(&text).unwrap().routing;
         assert_eq!(back, c, "{text}");
+    }
+
+    #[test]
+    fn vram_bytes_is_optional() {
+        let with: RoutingConfig =
+            toml::from_str("enabled = true\nvram_bytes = 25769803776\n").unwrap();
+        assert_eq!(with.vram_bytes, Some(25_769_803_776));
+        let without: RoutingConfig = toml::from_str("enabled = true\n").unwrap();
+        assert_eq!(without.vram_bytes, None);
+        assert!(!toml::to_string(&without).unwrap().contains("vram_bytes"));
     }
 }
