@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::profile::{Availability, ModelKey, ModelProfile};
 use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+use crate::residency::ResidencySnapshot;
 use crate::select::{Policy, find, select, unmet_needs};
 
 /// How long a model that failed to answer is skipped.
@@ -253,6 +254,7 @@ impl Router {
                 .and_then(|s| state.sticky.get(s).cloned()),
             allow_cloud: self.allow_cloud,
             exclude: Vec::new(),
+            residency: ResidencySnapshot::default(),
         };
         let (decision, retrying_cooled) = match select(&req, &without_cooling, &policy) {
             Ok(decision) => (decision, false),

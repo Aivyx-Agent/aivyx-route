@@ -11,6 +11,7 @@ use crate::profile::{
     Strength, Tier,
 };
 use crate::requirements::{HardNeed, Requirements};
+use crate::residency::{ResidencyNote, ResidencySnapshot, TIER_STEP};
 
 /// Constraints the product imposes on this call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,6 +22,9 @@ pub struct Policy {
     pub allow_cloud: bool,
     /// Models never to select.
     pub exclude: Vec<ModelKey>,
+    /// Which models are loaded and what VRAM is free. Soft: see
+    /// [`crate::residency`]. Empty ⇒ no effect.
+    pub residency: ResidencySnapshot,
 }
 
 /// One clause of a decision's explanation.
@@ -36,6 +40,7 @@ pub enum ReasonPart {
     },
     Strengths(Vec<Strength>),
     Priority(i32),
+    Residency(ResidencyNote),
     UnknownContextWindow,
     /// Hard needs met only because the capability's presence is unknown.
     UnverifiedCapabilities(Vec<Capability>),
@@ -58,6 +63,11 @@ impl fmt::Display for ReasonPart {
                 write!(f, "matches strengths: {}", names.join(", "))
             }
             ReasonPart::Priority(p) => write!(f, "operator priority {p}"),
+            ReasonPart::Residency(ResidencyNote::Loaded) => f.write_str("already loaded"),
+            ReasonPart::Residency(ResidencyNote::NeedsLoad) => f.write_str("needs loading"),
+            ReasonPart::Residency(ResidencyNote::WontFit) => {
+                f.write_str("may not fit in free VRAM")
+            }
             ReasonPart::UnknownContextWindow => f.write_str(
                 "context window unknown; no model with a known, large-enough window qualified",
             ),
@@ -152,7 +162,7 @@ pub fn select(
         return Err(no_candidate(&eligible, &needs, req));
     }
 
-    let mut ranked = rank(passing, req);
+    let mut ranked = rank(passing, req, &policy.residency);
     let mut reason: Vec<ReasonPart> = needs.iter().map(|n| ReasonPart::Required(*n)).collect();
     let sticky_pos = policy
         .sticky_model
@@ -165,7 +175,7 @@ pub fn select(
         }
         None => {
             let model = ranked.remove(0);
-            explain_rank(model, &ranked, req, &mut reason);
+            explain_rank(model, &ranked, req, &policy.residency, &mut reason);
             // Ranking put known windows first, so this one won only because
             // none qualified. Not true of a kept sticky model.
             if req.hard.min_context.is_some() && model.context_window.is_none() {
@@ -258,21 +268,21 @@ fn tier_penalty(wanted: Option<Tier>, got: Tier) -> u8 {
 type RankKey = (
     bool,
     bool,
-    u8,
+    u16,
     Reverse<usize>,
     Reverse<i32>,
     EndpointRef,
     String,
 );
 
-fn rank_key(p: &ModelProfile, req: &Requirements) -> RankKey {
+fn rank_key(p: &ModelProfile, req: &Requirements, residency: &ResidencySnapshot) -> RankKey {
     let relies_on_unknown_caps = !assumed_capabilities(p, &req.hard.needs()).is_empty();
     let unknown_ctx = req.hard.min_context.is_some() && p.context_window.is_none();
     let overlap = p.strengths.intersection(&req.soft.strengths).count();
     (
         relies_on_unknown_caps,
         unknown_ctx,
-        tier_penalty(req.soft.tier, p.tier),
+        u16::from(tier_penalty(req.soft.tier, p.tier)) * TIER_STEP + residency.cost(p).0,
         Reverse(overlap),
         Reverse(p.priority),
         p.endpoint.clone(),
@@ -280,8 +290,12 @@ fn rank_key(p: &ModelProfile, req: &Requirements) -> RankKey {
     )
 }
 
-fn rank<'a>(mut profiles: Vec<&'a ModelProfile>, req: &Requirements) -> Vec<&'a ModelProfile> {
-    profiles.sort_by_cached_key(|p| rank_key(p, req));
+fn rank<'a>(
+    mut profiles: Vec<&'a ModelProfile>,
+    req: &Requirements,
+    residency: &ResidencySnapshot,
+) -> Vec<&'a ModelProfile> {
+    profiles.sort_by_cached_key(|p| rank_key(p, req, residency));
     profiles
 }
 
@@ -289,6 +303,7 @@ fn explain_rank(
     model: &ModelProfile,
     rest: &[&ModelProfile],
     req: &Requirements,
+    residency: &ResidencySnapshot,
     reason: &mut Vec<ReasonPart>,
 ) {
     if rest.is_empty() {
@@ -312,6 +327,9 @@ fn explain_rank(
     if model.priority != 0 {
         reason.push(ReasonPart::Priority(model.priority));
     }
+    if let (_, Some(note)) = residency.cost(model) {
+        reason.push(ReasonPart::Residency(note));
+    }
 }
 
 fn no_candidate(eligible: &[&ModelProfile], needs: &[HardNeed], req: &Requirements) -> NoCandidate {
@@ -331,7 +349,9 @@ fn no_candidate(eligible: &[&ModelProfile], needs: &[HardNeed], req: &Requiremen
             if others.iter().any(|p| satisfies(p, need)) {
                 return None;
             }
-            let near_miss = rank(others, req).first().map(|p| p.id.clone());
+            let near_miss = rank(others, req, &ResidencySnapshot::default())
+                .first()
+                .map(|p| p.id.clone());
             Some(Unmet { need, near_miss })
         })
         .collect();
@@ -345,6 +365,7 @@ fn no_candidate(eligible: &[&ModelProfile], needs: &[HardNeed], req: &Requiremen
 mod tests {
     use super::*;
     use crate::requirements::{RequirementsBuilder, TaskKind, TaskOverrides};
+    use crate::residency::{ModelResidency, ResidencyNote, ResidencySnapshot, Vram};
 
     fn m(id: &str, tier: Tier) -> ModelProfile {
         let mut p = ModelProfile::new(id, EndpointRef::new("local"));
@@ -935,5 +956,125 @@ mod tests {
             err.to_string(),
             "no candidate models are available (needed: vision, tool calling)"
         );
+    }
+
+    const G: u64 = 1 << 30;
+
+    fn resident(entries: &[(&str, ModelResidency)], vram: Option<u64>) -> Policy {
+        Policy {
+            residency: ResidencySnapshot {
+                models: entries.iter().map(|(id, r)| (key(id), *r)).collect(),
+                vram: vram.map(|total_bytes| Vram {
+                    total_bytes,
+                    used_bytes: 0,
+                }),
+                ..ResidencySnapshot::default()
+            },
+            ..Policy::default()
+        }
+    }
+
+    const LOADED: ModelResidency = ModelResidency::Loaded { vram_bytes: None };
+
+    fn cold(size: Option<u64>) -> ModelResidency {
+        ModelResidency::NotLoaded { size_bytes: size }
+    }
+
+    #[test]
+    fn a_loaded_model_beats_an_unloaded_one_of_the_same_tier() {
+        let req = for_task(TaskKind::Chat).build();
+        let c = [m("a-cold", Tier::Medium), m("b-warm", Tier::Medium)];
+        // Without residency the id order decides.
+        assert_eq!(
+            select(&req, &c, &Policy::default()).unwrap().model.id,
+            "a-cold"
+        );
+        let policy = resident(&[("a-cold", cold(None)), ("b-warm", LOADED)], None);
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.id, "b-warm");
+        assert!(
+            d.reason
+                .contains(&ReasonPart::Residency(ResidencyNote::Loaded))
+        );
+        assert!(d.to_string().contains("already loaded"), "{d}");
+    }
+
+    #[test]
+    fn residency_is_worth_at_most_one_tier_step() {
+        // Chat wants Medium. A loaded Large (1 step off, 4 + 0) loses to a
+        // Medium needing a load of unknown size (0 + 2).
+        let req = for_task(TaskKind::Chat).build();
+        let c = [m("big", Tier::Large), m("mid", Tier::Medium)];
+        let policy = resident(&[("big", LOADED), ("mid", cold(None))], None);
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "mid");
+        // A loaded Small (smaller than wanted: 12 + 0) loses even to a
+        // Medium that won't fit (0 + 4).
+        let c = [m("mid", Tier::Medium), m("small", Tier::Small)];
+        let policy = resident(
+            &[("mid", cold(Some(30 * G))), ("small", LOADED)],
+            Some(24 * G),
+        );
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "mid");
+    }
+
+    #[test]
+    fn a_model_that_wont_fit_is_penalised_not_dropped() {
+        let req = for_task(TaskKind::Chat).vision().build();
+        let c = [
+            m("plain", Tier::Medium),
+            with_caps(m("seer", Tier::Medium), &[Capability::Vision]),
+        ];
+        let policy = resident(
+            &[("plain", LOADED), ("seer", cold(Some(30 * G)))],
+            Some(24 * G),
+        );
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "seer");
+    }
+
+    #[test]
+    fn at_the_one_step_boundary_priority_decides() {
+        // Exact tier but won't fit (0 + 4) ties a loaded one step larger
+        // (4 + 0); operator priority then decides.
+        // `z-big` sorts after `mid`, so without the priority `mid` wins.
+        let req = for_task(TaskKind::Chat).build();
+        let entries = [("z-big", LOADED), ("mid", cold(Some(30 * G)))];
+        let c = [m("z-big", Tier::Large), m("mid", Tier::Medium)];
+        let policy = resident(&entries, Some(24 * G));
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "mid");
+        let mut big = m("z-big", Tier::Large);
+        big.priority = 1;
+        let c = [big, m("mid", Tier::Medium)];
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "z-big");
+    }
+
+    #[test]
+    fn load_cost_scales_with_size() {
+        let req = for_task(TaskKind::Chat).build();
+        let c = [
+            m("a-large-file", Tier::Medium),
+            m("b-small-file", Tier::Medium),
+        ];
+        let policy = resident(
+            &[
+                ("a-large-file", cold(Some(20 * G))),
+                ("b-small-file", cold(Some(5 * G))),
+            ],
+            Some(24 * G),
+        );
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.id, "b-small-file");
+        assert!(d.to_string().contains("needs loading"), "{d}");
+    }
+
+    #[test]
+    fn residency_never_moves_a_sticky_model() {
+        let req = for_task(TaskKind::Chat).build();
+        let c = [m("a-warm", Tier::Medium), m("b-sticky", Tier::Medium)];
+        let mut policy = resident(
+            &[("a-warm", LOADED), ("b-sticky", cold(Some(30 * G)))],
+            Some(24 * G),
+        );
+        policy.sticky_model = Some(key("b-sticky"));
+        assert_eq!(select(&req, &c, &policy).unwrap().model.id, "b-sticky");
     }
 }

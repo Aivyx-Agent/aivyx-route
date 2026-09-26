@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod merge;
 pub mod profile;
 pub mod requirements;
+pub mod residency;
 pub mod router;
 pub mod select;
 
@@ -25,6 +26,9 @@ pub use profile::{
 pub use requirements::{
     HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
     TaskOverride, TaskOverrides,
+};
+pub use residency::{
+    ModelResidency, ResidencyNote, ResidencySnapshot, SlotPressure, TIER_STEP, Vram,
 };
 pub use router::{DEFAULT_COOLDOWN, NoRoute, RoutePlan, RouteQuery, RouteRecord, Router};
 pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, find, select, unmet_needs};
