@@ -1077,4 +1077,38 @@ mod tests {
         policy.sticky_model = Some(key("b-sticky"));
         assert_eq!(select(&req, &c, &policy).unwrap().model.id, "b-sticky");
     }
+
+    #[test]
+    fn a_resident_default_backend_beats_a_small_cold_load() {
+        // The default backend's model has no entry of its own (its server
+        // reports a different id); beside it, a small cold Ollama model.
+        let req = for_task(TaskKind::Chat).build();
+        let c = [
+            on(m("qwen3-8b", Tier::Medium), "backend"),
+            on(m("small", Tier::Medium), "ollama"),
+        ];
+        let mut policy = Policy::default();
+        policy.residency.models.insert(
+            ModelKey {
+                endpoint: EndpointRef::new("ollama"),
+                id: "small".into(),
+            },
+            cold(Some(5 * G)),
+        );
+        policy.residency.vram = Some(Vram {
+            total_bytes: 24 * G,
+            used_bytes: 0,
+        });
+        // (a) Known behaviour: unobserved (2) loses to a cheap load (1).
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.endpoint, EndpointRef::new("ollama"));
+        // (b) Marked resident, the default backend's model is loaded (0).
+        policy
+            .residency
+            .resident_endpoints
+            .insert(EndpointRef::new("backend"));
+        let d = select(&req, &c, &policy).unwrap();
+        assert_eq!(d.model.endpoint, EndpointRef::new("backend"));
+        assert!(d.to_string().contains("already loaded"), "{d}");
+    }
 }

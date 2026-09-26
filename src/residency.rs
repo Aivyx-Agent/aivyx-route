@@ -2,7 +2,7 @@
 //! load could use. Data only — `discovery::residency` fills it, `select`
 //! scores it. Soft: it never affects hard filtering, stickiness or pins.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -39,6 +39,10 @@ pub struct SlotPressure {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResidencySnapshot {
     pub models: BTreeMap<ModelKey, ModelResidency>,
+    /// Endpoints whose every model counts as loaded when it has no entry
+    /// of its own (a single-model server: whatever the product calls its
+    /// model, it is resident).
+    pub resident_endpoints: BTreeSet<EndpointRef>,
     pub vram: Option<Vram>,
     pub slots: BTreeMap<EndpointRef, SlotPressure>,
 }
@@ -71,9 +75,14 @@ impl ResidencySnapshot {
 
     /// `profile`'s residency cost (0..=[`TIER_STEP`]) and note. No entry
     /// costs 2, the same as a load of unknown size, so an empty snapshot
-    /// ranks every model equally.
+    /// ranks every model equally — unless its endpoint is in
+    /// [`Self::resident_endpoints`], which makes it loaded. A per-model
+    /// entry always wins over the endpoint signal.
     pub fn cost(&self, profile: &ModelProfile) -> (u16, Option<ResidencyNote>) {
         match self.models.get(&profile.key()) {
+            None if self.resident_endpoints.contains(&profile.endpoint) => {
+                (0, Some(ResidencyNote::Loaded))
+            }
             None => (2, None),
             Some(ModelResidency::Loaded { .. }) => (0, Some(ResidencyNote::Loaded)),
             Some(ModelResidency::NotLoaded { size_bytes }) => {
@@ -120,7 +129,13 @@ mod tests {
                 used_bytes,
             }),
             slots: BTreeMap::new(),
+            resident_endpoints: BTreeSet::new(),
         }
+    }
+
+    fn with_resident_local(mut s: ResidencySnapshot) -> ResidencySnapshot {
+        s.resident_endpoints.insert(EndpointRef::new("local"));
+        s
     }
 
     #[test]
@@ -187,5 +202,42 @@ mod tests {
             None,
         );
         assert_eq!(s.cost(&profile("m")), (2, Some(ResidencyNote::NeedsLoad)));
+    }
+
+    #[test]
+    fn a_resident_endpoint_counts_its_unlisted_models_as_loaded() {
+        let s = with_resident_local(snapshot(&[], None));
+        assert_eq!(
+            s.cost(&profile("anything")),
+            (0, Some(ResidencyNote::Loaded))
+        );
+        // Another endpoint is unaffected.
+        let elsewhere = ModelProfile::new("anything", EndpointRef::new("other"));
+        assert_eq!(s.cost(&elsewhere), (2, None));
+    }
+
+    #[test]
+    fn a_per_model_entry_wins_over_a_resident_endpoint() {
+        let s = with_resident_local(snapshot(
+            &[(
+                "big",
+                ModelResidency::NotLoaded {
+                    size_bytes: Some(30 * G),
+                },
+            )],
+            Some((24 * G, 0)),
+        ));
+        assert_eq!(
+            s.cost(&profile("big")),
+            (TIER_STEP, Some(ResidencyNote::WontFit))
+        );
+    }
+
+    #[test]
+    fn a_resident_endpoint_adds_no_evictable_vram() {
+        let plain = snapshot(&[], Some((24 * G, 20 * G)));
+        let resident = with_resident_local(plain.clone());
+        assert_eq!(resident.available_vram(), Some(4 * G));
+        assert_eq!(resident.available_vram(), plain.available_vram());
     }
 }

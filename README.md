@@ -156,6 +156,12 @@ the total only when nothing else reports one. `collect` is meant to be
 polled on a short TTL (5s), never per request — like discovery, it's I/O,
 so it stays behind the `discovery` feature.
 
+A snapshot's `resident_endpoints` marks single-model servers: a model with
+no entry of its own on such an endpoint counts as loaded, whatever the
+product calls it (a per-model entry still wins). `collect` sets it for a
+broker reporting exactly one loaded model; products mark an
+OpenAI-compatible default backend resident themselves (Part 4b).
+
 ## Development
 
 ```sh

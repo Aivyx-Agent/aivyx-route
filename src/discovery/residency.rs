@@ -11,7 +11,8 @@ use crate::profile::{EndpointRef, ModelKey};
 use crate::residency::{ModelResidency, ResidencySnapshot, SlotPressure, Vram};
 
 /// A product's `aivyx-broker`. Brokers front the product's *default*
-/// backend, so what the broker reports is keyed to `endpoint`.
+/// backend, so what the broker reports is keyed to `endpoint`. A broker
+/// reporting exactly one model, loaded, also marks `endpoint` resident.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerSource {
     pub endpoint: EndpointRef,
@@ -67,6 +68,13 @@ pub async fn collect(
     if let Some(broker) = broker
         && let Ok(report) = broker_report(&broker.base_url, client).await
     {
+        // A single loaded model is a single-model server: whatever the
+        // product calls its model, it is resident.
+        if let [only] = report.models.as_slice()
+            && only.loaded
+        {
+            snap.resident_endpoints.insert(broker.endpoint.clone());
+        }
         for model in report.models {
             let residency = if model.loaded {
                 ModelResidency::Loaded { vram_bytes: None }
@@ -394,6 +402,101 @@ mod tests {
             snap.slots[&EndpointRef::new("backend")],
             SlotPressure { busy: 1, total: 2 }
         );
+    }
+
+    fn broker_at(server: &MockServer) -> BrokerSource {
+        BrokerSource {
+            endpoint: EndpointRef::new("backend"),
+            base_url: server.uri(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_broker_with_one_loaded_model_marks_its_endpoint_resident() {
+        let body = r#"{"models":[{"id":"/models/qwen3-8b-Q4_K_M.gguf","loaded":true}],"vram":null,"slots":{"busy":0,"total":1}}"#;
+        let server = serve("/v1/aivyx/residency", body).await;
+        let snap = collect(
+            &[],
+            Some(&broker_at(&server)),
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert!(
+            snap.resident_endpoints
+                .contains(&EndpointRef::new("backend"))
+        );
+        // The per-id entry is still recorded.
+        assert_eq!(
+            snap.models[&key("backend", "/models/qwen3-8b-Q4_K_M.gguf")],
+            ModelResidency::Loaded { vram_bytes: None }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_multi_model_broker_does_not_mark_its_endpoint_resident() {
+        let server = serve("/v1/aivyx/residency", BROKER).await;
+        let snap = collect(
+            &[],
+            Some(&broker_at(&server)),
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert!(snap.resident_endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_single_unloaded_broker_model_does_not_mark_its_endpoint_resident() {
+        let body =
+            r#"{"models":[{"id":"only","loaded":false}],"vram":null,"slots":{"busy":0,"total":1}}"#;
+        let server = serve("/v1/aivyx/residency", body).await;
+        let snap = collect(
+            &[],
+            Some(&broker_at(&server)),
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert!(snap.resident_endpoints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_broker_body_without_upstream_or_gpu_parses() {
+        let body = r#"{"models":[],"vram":null,"slots":{"busy":0,"total":2}}"#;
+        let server = serve("/v1/aivyx/residency", body).await;
+        let snap = collect(
+            &[],
+            Some(&broker_at(&server)),
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(snap.vram, None);
+        assert!(snap.models.is_empty());
+        assert!(snap.resident_endpoints.is_empty());
+        assert_eq!(
+            snap.slots[&EndpointRef::new("backend")],
+            SlotPressure { busy: 0, total: 2 }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_broker_body_without_slots_parses() {
+        let body = r#"{"models":[{"id":"a","loaded":false}],"vram":null}"#;
+        let server = serve("/v1/aivyx/residency", body).await;
+        let snap = collect(
+            &[],
+            Some(&broker_at(&server)),
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("backend", "a")],
+            ModelResidency::NotLoaded { size_bytes: None }
+        );
+        assert!(snap.slots.is_empty());
     }
 
     #[tokio::test]

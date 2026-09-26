@@ -426,11 +426,22 @@ Split into **4a** (`aivyx-route` + `aivyx-broker`) and **4b** (product
 wiring) — decision 13.
 
 - **Crate — data**: `ResidencySnapshot { models: BTreeMap<ModelKey,
-  ModelResidency>, vram: Option<Vram>, slots: BTreeMap<EndpointRef,
-  SlotPressure> }` with `ModelResidency::{Loaded { vram_bytes },
-  NotLoaded { size_bytes }}` (both `Option<u64>`). I/O-free. Passed to
-  `select()` as `Policy.residency`; `Router::set_residency` stores the
-  latest one for `plan()`.
+  ModelResidency>, resident_endpoints: BTreeSet<EndpointRef>, vram:
+  Option<Vram>, slots: BTreeMap<EndpointRef, SlotPressure> }` with
+  `ModelResidency::{Loaded { vram_bytes }, NotLoaded { size_bytes }}`
+  (both `Option<u64>`). I/O-free. Passed to `select()` as
+  `Policy.residency`; `Router::set_residency` stores the latest one for
+  `plan()`.
+- **Resident endpoints** (amended 2026-09-26, final review I1): a model
+  with no entry of its own on an endpoint in `resident_endpoints` counts
+  as `Loaded` (cost 0). This is for single-model servers, whose one
+  model is resident whatever the product calls it — the server's own id
+  (a llama-server `--alias` or model path) rarely equals the product's
+  configured model name, so a per-id entry would never match. A per-model
+  entry always wins over the endpoint signal. Resident endpoints add no
+  evictable VRAM (their size is unknown). Without this, "no entry" (2)
+  would lose to a small cold load (1) and routing would force a load
+  beside an always-loaded default backend.
 - **Crate — scoring** (decision 12): `rank_key`'s tier column becomes
   `tier_penalty × 4 + residency_cost`. Cost: no entry 2; `Loaded` 0;
   `NotLoaded` with known size and available VRAM: > available ⇒ 4,
@@ -448,8 +459,11 @@ wiring) — decision 13.
   loaded, `unloaded`/`sleeping` ⇒ not loaded, no `status` ⇒ loaded —
   single-model server); the broker (below). Brokers front a product's
   *default* backend (never a `[routing.endpoints]` entry), so broker
-  residency is keyed to the default endpoint. An unreachable source
-  contributes nothing; `collect` never fails.
+  residency is keyed to the default endpoint. A broker reporting exactly
+  one model, and that model loaded, also puts the default endpoint in
+  `resident_endpoints`. In 4b, products mark a single-model
+  OpenAI-compatible default backend resident themselves (nothing to ask
+  it). An unreachable source contributes nothing; `collect` never fails.
 - **VRAM** (decision 11): the broker reads the GPU (`nvidia-smi`, summed
   across GPUs; else the AMD card with the largest
   `mem_info_vram_total`; `--vram-source auto|nvidia|amd|none`). Without a
