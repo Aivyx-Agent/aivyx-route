@@ -69,7 +69,9 @@ always removed.
 
 On an Ollama endpoint, a tagless roster `id` (`llama3.2`) that discovery
 reported only as `llama3.2:latest` enriches that discovered model, under
-your name for it, instead of adding a second one.
+your name for it, instead of adding a second one. Listing both spellings
+names one model (kept as `llama3.2:latest`); both entries apply to it, in
+roster order.
 
 An `endpoint` that is neither the product's default nor a
 `[routing.endpoints]` key (a typo, say) fails closed: its models are treated

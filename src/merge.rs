@@ -1,10 +1,10 @@
 //! Combine what discovery found with what the operator declared.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::config::{DefaultEndpoint, EndpointKind, RoutingConfig};
+use crate::config::{DefaultEndpoint, EndpointKind, RosterEntry, RoutingConfig};
 use crate::profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile,
 };
@@ -85,17 +85,40 @@ pub fn merge(
         }
     }
 
+    let roster_ep = |entry: &RosterEntry| {
+        entry
+            .endpoint
+            .as_deref()
+            .map(EndpointRef::new)
+            .unwrap_or_else(|| default.name.clone())
+    };
+
+    // Resolve bare Ollama names against discovered `name:latest` once, up
+    // front, so the outcome can't depend on roster order.
+    let roster_keys: BTreeSet<(EndpointRef, String)> = config
+        .models
+        .iter()
+        .map(|e| (roster_ep(e), e.id.clone()))
+        .collect();
+    let mut resolved: BTreeMap<(EndpointRef, String), String> = BTreeMap::new();
+    for key in &roster_keys {
+        if let Some(id) =
+            resolve_ollama_latest(&mut profiles, key, &roster_keys, endpoint_kind(&key.0))
+        {
+            resolved.insert(key.clone(), id);
+        }
+    }
+
     // Collect all capability denies for each (endpoint, id) key.
     let mut all_denies: BTreeMap<(EndpointRef, String), CapabilitySet> = BTreeMap::new();
 
     for entry in &config.models {
-        let ep = entry
-            .endpoint
-            .as_deref()
-            .map(EndpointRef::new)
-            .unwrap_or_else(|| default.name.clone());
+        let ep = roster_ep(entry);
         let key = (ep.clone(), entry.id.clone());
-        adopt_ollama_latest(&mut profiles, &key, endpoint_kind(&ep));
+        let key = match resolved.get(&key) {
+            Some(id) => (ep.clone(), id.clone()),
+            None => key,
+        };
 
         // Track all denies for this key.
         all_denies
@@ -152,23 +175,34 @@ pub fn merge(
 
 /// Ollama reports a tagless model as `name:latest`, but operators write the
 /// bare `name` (what `ollama run` and the products' `model` settings
-/// accept). When a roster entry on an Ollama endpoint names a bare `name`
-/// that discovery didn't report but `name:latest` it did, that discovered
-/// profile is re-keyed to the operator's `name` so the entry enriches it
-/// instead of adding a second, blind profile for the same model.
-fn adopt_ollama_latest(
+/// accept). For a roster entry on an Ollama endpoint naming a bare `name`
+/// that discovery didn't report, but whose `name:latest` it did:
+///
+/// - if the roster names only the bare `name`, the discovered profile is
+///   re-keyed to it, so the entry enriches it under the operator's name;
+/// - if the roster also names `name:latest`, both entries mean one model:
+///   returns `name:latest`, the id the bare entry resolves to, so both
+///   apply (in roster order) to the one discovered profile.
+///
+/// Anything else is left as written.
+fn resolve_ollama_latest(
     profiles: &mut BTreeMap<(EndpointRef, String), ModelProfile>,
     key: &(EndpointRef, String),
+    roster_keys: &BTreeSet<(EndpointRef, String)>,
     kind: Option<EndpointKind>,
-) {
+) -> Option<String> {
     let (ep, id) = key;
     if kind != Some(EndpointKind::Ollama) || id.contains(':') || profiles.contains_key(key) {
-        return;
+        return None;
     }
-    if let Some(mut p) = profiles.remove(&(ep.clone(), format!("{id}:latest"))) {
-        p.id = id.clone();
-        profiles.insert(key.clone(), p);
+    let latest = (ep.clone(), format!("{id}:latest"));
+    if roster_keys.contains(&latest) {
+        return profiles.contains_key(&latest).then(|| latest.1.clone());
     }
+    let mut p = profiles.remove(&latest)?;
+    p.id = id.clone();
+    profiles.insert(key.clone(), p);
+    None
 }
 
 #[cfg(test)]
@@ -269,6 +303,59 @@ mod tests {
                 discovered: true,
                 in_roster: true
             }
+        );
+    }
+
+    /// Listing both `m` and `m:latest` names one model: whatever the roster
+    /// order, there is one profile, both entries apply, and every deny holds.
+    #[test]
+    fn bare_and_latest_entries_for_one_model_merge_in_either_order() {
+        let reports = [reached(
+            "main",
+            vec![found(
+                "m:latest",
+                &[Capability::Tools, Capability::Vision],
+                None,
+            )],
+        )];
+        let mut bare = entry("m");
+        bare.tier = Some(Tier::Large);
+        let mut tagged = entry("m:latest");
+        tagged.capabilities_deny = CapabilitySet::from([Capability::Vision]);
+        for roster in [
+            vec![bare.clone(), tagged.clone()],
+            vec![tagged.clone(), bare.clone()],
+        ] {
+            let ps = merge(&config_with(roster), &local_default("main"), &reports);
+            assert_eq!(ps.len(), 1, "got {ps:?}");
+            let p = &ps[0];
+            assert_eq!(p.id, "m:latest");
+            assert_eq!(p.tier, Tier::Large);
+            assert_eq!(p.capabilities, CapabilitySet::from([Capability::Tools]));
+            assert_eq!(p.availability, Availability::Available);
+        }
+    }
+
+    /// If discovery reported the bare name itself, nothing is adopted.
+    #[test]
+    fn a_discovered_bare_name_is_joined_exactly() {
+        let reports = [reached(
+            "main",
+            vec![
+                found("m", &[Capability::Tools], None),
+                found("m:latest", &[], None),
+            ],
+        )];
+        let ps = merge(
+            &config_with(vec![entry("m")]),
+            &local_default("main"),
+            &reports,
+        );
+        let ids: Vec<&str> = ps.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["m", "m:latest"]);
+        assert_eq!(
+            find(&ps, "m").capabilities,
+            CapabilitySet::from([Capability::Tools])
         );
     }
 
