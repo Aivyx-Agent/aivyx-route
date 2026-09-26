@@ -35,6 +35,7 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/select.rs` — the pure, deterministic `select()`.
 - `src/residency.rs` — `ResidencySnapshot` and its cost (soft, ≤ one tier-step); `discovery::residency` fills it.
 - `src/router.rs` — the shared stateful layer (stickiness, pins, cooldowns) products wrap around select().
+- `src/sessions.rs` — `SessionMap`, the size-capped per-session map the Router keeps its per-conversation state in (default `MAX_SESSIONS` = 1024, least recently updated evicted).
 - `src/config.rs` — the `[routing]` TOML shape both products embed.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.
 - `src/classifier.rs` — optional small-model classifier prompt/parse.

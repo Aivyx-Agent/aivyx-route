@@ -20,6 +20,7 @@ use crate::profile::{Availability, ModelKey, ModelProfile};
 use crate::requirements::{Requirements, TaskKind, TaskOverrides};
 use crate::residency::ResidencySnapshot;
 use crate::select::{Policy, find, select, unmet_needs};
+use crate::sessions::SessionMap;
 
 /// How long a model that failed to answer is skipped.
 pub const DEFAULT_COOLDOWN: Duration = Duration::from_secs(60);
@@ -95,13 +96,14 @@ pub struct Router {
 #[derive(Default)]
 struct State {
     profiles: Vec<ModelProfile>,
-    /// Session → the model its main thread is on.
-    sticky: HashMap<String, ModelKey>,
+    /// Session → the model its main thread is on. Per-session maps are
+    /// capped ([`SessionMap`]): conversations end without telling us.
+    sticky: SessionMap<ModelKey>,
     /// Session → an explicit operator pin.
-    pins: HashMap<String, ModelKey>,
+    pins: SessionMap<ModelKey>,
     /// Model → when its cooldown (from a retryable failure) expires.
     cooling: HashMap<ModelKey, Instant>,
-    last: HashMap<String, RouteRecord>,
+    last: SessionMap<RouteRecord>,
     /// The latest residency snapshot; empty until a product sets one.
     residency: ResidencySnapshot,
 }
@@ -121,6 +123,19 @@ impl Router {
 
     pub fn with_cooldown(mut self, cooldown: Duration) -> Self {
         self.cooldown = cooldown;
+        self
+    }
+
+    /// Keep per-session state (sticky model, pin, last decision) for at
+    /// most `max` sessions each; past that, the least recently updated
+    /// session is forgotten. Default [`crate::MAX_SESSIONS`].
+    pub fn with_max_sessions(self, max: usize) -> Self {
+        {
+            let mut state = self.state.lock().unwrap();
+            state.sticky = SessionMap::with_capacity(max);
+            state.pins = SessionMap::with_capacity(max);
+            state.last = SessionMap::with_capacity(max);
+        }
         self
     }
 
@@ -368,6 +383,26 @@ mod tests {
 
     fn secs(n: u64) -> Duration {
         Duration::from_secs(n)
+    }
+
+    #[test]
+    fn per_session_state_is_capped_and_the_idlest_session_goes_first() {
+        let r = router(three()).with_max_sessions(2);
+        let t0 = Instant::now();
+        for s in ["s1", "s2", "s3"] {
+            let plan = r.plan(&q(TaskKind::CodeEdit, Some(s)), t0).unwrap();
+            r.succeeded(&plan, &plan.chain[0].clone(), &[]);
+        }
+        assert_eq!(r.current("s1"), None, "the idlest session was evicted");
+        assert!(r.last_decision("s1").is_none());
+        assert_eq!(r.current("s3"), Some(key("gpu", "big")));
+        assert!(r.last_decision("s2").is_some());
+        // Pins are capped the same way.
+        for s in ["p1", "p2", "p3"] {
+            r.pin(s, key("gpu", "tiny"));
+        }
+        assert_eq!(r.pinned("p1"), None);
+        assert_eq!(r.pinned("p3"), Some(key("gpu", "tiny")));
     }
 
     #[test]

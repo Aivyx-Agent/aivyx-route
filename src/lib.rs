@@ -14,6 +14,7 @@ pub mod requirements;
 pub mod residency;
 pub mod router;
 pub mod select;
+pub mod sessions;
 
 pub use config::{
     ConfigIssue, DefaultEndpoint, EndpointConfig, EndpointKind, RosterEntry, RoutingConfig,
@@ -32,3 +33,4 @@ pub use residency::{
 };
 pub use router::{DEFAULT_COOLDOWN, NoRoute, RoutePlan, RouteQuery, RouteRecord, Router};
 pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, find, select, unmet_needs};
+pub use sessions::{MAX_SESSIONS, SessionMap};
