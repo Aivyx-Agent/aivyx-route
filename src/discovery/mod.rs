@@ -6,6 +6,7 @@
 mod llama_router;
 mod ollama;
 mod openai_compat;
+pub mod residency;
 
 use std::time::Duration;
 

@@ -136,6 +136,26 @@ Semantics (operator-approved in model-routing Part 2):
   session's sticky model;
 - a pin never writes the sticky map, and `unpin` clears it too.
 
+## Residency (Part 4)
+
+`Policy.residency` is a `ResidencySnapshot`: which models are loaded, and
+the host's VRAM. `select` scores it as a soft cost of at most one
+tier-step — loaded models rank first, then loads that fit comfortably,
+then loads that don't, and residency never affects hard filtering,
+stickiness or pins. An empty snapshot (the default) changes nothing:
+every model costs the same, so ordering is unchanged. `Router::set_residency`
+replaces the snapshot the router's `plan` scores with; a product refreshes
+it, it doesn't rebuild the router.
+
+`discovery::residency::collect` (feature `discovery`) builds a snapshot
+from up to three signals: Ollama's `/api/ps` + `/api/tags`, llama-server
+router mode's `/models`, and an `aivyx-broker` reporting a product's
+default backend, VRAM and slot pressure — the broker's VRAM wins when
+present. `[routing] vram_bytes` is the operator's own VRAM figure, used as
+the total only when nothing else reports one. `collect` is meant to be
+polled on a short TTL (5s), never per request — like discovery, it's I/O,
+so it stays behind the `discovery` feature.
+
 ## Development
 
 ```sh

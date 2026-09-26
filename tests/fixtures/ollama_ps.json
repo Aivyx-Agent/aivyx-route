@@ -1,0 +1,5 @@
+{
+  "models": [
+    { "name": "qwen3-coder:30b", "model": "qwen3-coder:30b", "size": 19971883008, "digest": "06f7a2a3", "details": { "family": "qwen3moe", "parameter_size": "30.5B", "quantization_level": "Q4_K_M" }, "expires_at": "2026-09-26T13:05:12.123456+08:00", "size_vram": 19971883008 }
+  ]
+}

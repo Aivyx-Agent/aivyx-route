@@ -33,6 +33,7 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/profile.rs` — `ModelProfile` and its vocabulary types.
 - `src/requirements.rs` — `Requirements`, `TaskKind`, task→tier defaults.
 - `src/select.rs` — the pure, deterministic `select()`.
+- `src/residency.rs` — `ResidencySnapshot` and its cost (soft, ≤ one tier-step); `discovery::residency` fills it.
 - `src/router.rs` — the shared stateful layer (stickiness, pins, cooldowns) products wrap around select().
 - `src/config.rs` — the `[routing]` TOML shape both products embed.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.

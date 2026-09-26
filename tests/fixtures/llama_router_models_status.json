@@ -1,0 +1,10 @@
+{
+  "data": [
+    { "id": "gemma-3-4b", "status": { "value": "loaded", "args": ["llama-server", "-ctx", "4096"] } },
+    { "id": "qwen3-8b", "status": { "value": "loading" } },
+    { "id": "phi-4", "status": { "value": "unloaded" } },
+    { "id": "mistral-7b", "status": { "value": "sleeping", "args": ["llama-server"] } },
+    { "id": "broken", "status": { "value": "unloaded", "failed": true, "exit_code": 1 } },
+    { "id": "odd", "status": { "value": "reticulating" } }
+  ]
+}
