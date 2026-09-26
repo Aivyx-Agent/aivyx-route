@@ -401,6 +401,17 @@ mod tests {
         assert_eq!(snap.vram.map(|v| v.used_bytes), Some(2_000_000_000));
     }
 
+    #[test]
+    fn an_already_listed_bare_name_is_left_alone() {
+        let own = ModelResidency::NotLoaded { size_bytes: Some(1) };
+        let latest = ModelResidency::Loaded { vram_bytes: Some(7) };
+        let got = with_untagged_aliases(vec![
+            ("m".to_string(), own),
+            ("m:latest".to_string(), latest),
+        ]);
+        assert_eq!(got, vec![("m".to_string(), own), ("m:latest".to_string(), latest)]);
+    }
+
     #[tokio::test]
     async fn llama_router_statuses_map_to_residency() {
         let server = serve("/models", ROUTER).await;
