@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::config::{DefaultEndpoint, RoutingConfig};
+use crate::config::{DefaultEndpoint, EndpointKind, RoutingConfig};
 use crate::profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelProfile,
 };
@@ -95,6 +95,7 @@ pub fn merge(
             .map(EndpointRef::new)
             .unwrap_or_else(|| default.name.clone());
         let key = (ep.clone(), entry.id.clone());
+        adopt_ollama_latest(&mut profiles, &key, endpoint_kind(&ep));
 
         // Track all denies for this key.
         all_denies
@@ -147,6 +148,27 @@ pub fn merge(
     }
 
     profiles.into_values().collect()
+}
+
+/// Ollama reports a tagless model as `name:latest`, but operators write the
+/// bare `name` (what `ollama run` and the products' `model` settings
+/// accept). When a roster entry on an Ollama endpoint names a bare `name`
+/// that discovery didn't report but `name:latest` it did, that discovered
+/// profile is re-keyed to the operator's `name` so the entry enriches it
+/// instead of adding a second, blind profile for the same model.
+fn adopt_ollama_latest(
+    profiles: &mut BTreeMap<(EndpointRef, String), ModelProfile>,
+    key: &(EndpointRef, String),
+    kind: Option<EndpointKind>,
+) {
+    let (ep, id) = key;
+    if kind != Some(EndpointKind::Ollama) || id.contains(':') || profiles.contains_key(key) {
+        return;
+    }
+    if let Some(mut p) = profiles.remove(&(ep.clone(), format!("{id}:latest"))) {
+        p.id = id.clone();
+        profiles.insert(key.clone(), p);
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +238,63 @@ mod tests {
 
     fn find<'a>(ps: &'a [ModelProfile], id: &str) -> &'a ModelProfile {
         ps.iter().find(|p| p.id == id).unwrap()
+    }
+
+    /// Ollama reports a tagless model as `name:latest`; a roster entry
+    /// naming the bare `name` enriches that discovered profile (under the
+    /// operator's name) instead of adding a second, blind one.
+    #[test]
+    fn a_bare_roster_name_adopts_the_discovered_ollama_latest_profile() {
+        let reports = [reached(
+            "main",
+            vec![found(
+                "llama3.2:latest",
+                &[Capability::Tools],
+                Some(131_072),
+            )],
+        )];
+        let mut e = entry("llama3.2");
+        e.tier = Some(Tier::Small);
+        let ps = merge(&config_with(vec![e]), &local_default("main"), &reports);
+        assert_eq!(ps.len(), 1, "got {ps:?}");
+        let p = &ps[0];
+        assert_eq!(p.id, "llama3.2");
+        assert_eq!(p.capabilities, CapabilitySet::from([Capability::Tools]));
+        assert_eq!(p.context_window, Some(131_072));
+        assert_eq!(p.tier, Tier::Small);
+        assert_eq!(p.availability, Availability::Available);
+        assert_eq!(
+            p.source,
+            ProfileSource {
+                discovered: true,
+                in_roster: true
+            }
+        );
+    }
+
+    #[test]
+    fn latest_adoption_is_ollama_only_and_never_overrides_an_explicit_tag() {
+        // A non-Ollama endpoint keeps both profiles.
+        let default = DefaultEndpoint {
+            name: ep("main"),
+            kind: EndpointKind::OpenaiCompat,
+        };
+        let reports = [reached("main", vec![found("m:latest", &[], None)])];
+        let ps = merge(&config_with(vec![entry("m")]), &default, &reports);
+        assert_eq!(ps.len(), 2, "got {ps:?}");
+        // An explicit `:latest` entry joins exactly; a different tag is not
+        // adopted.
+        let reports = [reached(
+            "main",
+            vec![found("m:latest", &[], None), found("q:8b", &[], None)],
+        )];
+        let ps = merge(
+            &config_with(vec![entry("m:latest"), entry("q")]),
+            &local_default("main"),
+            &reports,
+        );
+        let ids: Vec<&str> = ps.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["m:latest", "q", "q:8b"]);
     }
 
     #[test]
