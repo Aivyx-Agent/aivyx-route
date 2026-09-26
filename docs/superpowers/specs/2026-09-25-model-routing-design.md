@@ -42,6 +42,9 @@ the sections below:
 | 8 | Capabilities a discovery source can't report | **Unknown, not absent**: an unknown capability passes a hard need but ranks below every model known to have it, and the reason says "assumed but unverified" |
 | 9 | Endpoint names not declared anywhere | **Fail closed**: treated as `Cloud` + `Unavailable` (a typo must never make a cloud model look local); `RoutingConfig::validate()` reports it |
 | 10 | Model identity | **`ModelKey` = (endpoint, id)**: the same id on two endpoints is two models; `Policy` stickiness/exclusion use keys, not bare ids |
+| 11 | VRAM source | No LLM backend reports free/total VRAM, so **`aivyx-broker` reads the GPU itself** (`nvidia-smi`, else the AMD card with the most VRAM via sysfs); `[routing] vram_bytes` is the operator fallback without a broker; with neither, no won't-fit term |
+| 12 | Residency weight | Residency cost in **quarter tier-steps** added to the tier penalty (one ranking column): loaded 0, no signal 2, needs a load 1–3 by size, won't fit 4 (= one tier-step, never disqualifying) |
+| 13 | Part 4 split | **4a**: crate scoring + signal readers + broker endpoint; **4b**: periodic refresh wired into both products |
 
 ## Grounding
 
@@ -101,7 +104,7 @@ implementation plan.
 | **1** | new `aivyx-route` | core types, merge rules, requirement extraction, pure `select()`, discovery clients (feature-gated), classifier prompt/parse helpers | B, A |
 | **2** | `aivyx-coder` | `RoutedBackend` + backend pool, `[routing]` config, stickiness, call-site tagging, `/models` + `/model` | B, A |
 | **3** | `aivyx-pa` | `RoutedProvider`, `[routing]` config, stickiness, call-site tagging, cloud escalation, sensitivity taint, optional classifier wiring | B, A, C |
-| **4** | `aivyx-broker` + `aivyx-route` | residency endpoint on the broker; `ResidencyCost` scoring term in the crate; product wiring | D |
+| **4** | `aivyx-broker` + `aivyx-route` | residency endpoint on the broker; residency scoring in the crate; product wiring (4a crate + broker, 4b products) | D |
 
 The classifier is not its own part: the crate ships its prompt + strict
 parser (Part 1); `aivyx-pa` wires it (Part 3). `aivyx-coder` never uses it.
@@ -162,7 +165,7 @@ parser (Part 1); `aivyx-pa` wires it (Part 3). `aivyx-coder` never uses it.
      ones; then tier fit (exact = best; one step off = penalty;
      larger-than-needed penalised less than smaller-than-needed), strength
      overlap, then `priority`, then endpoint and `id` lexical order as the
-     final deterministic tie-break. (Part 4 adds `ResidencyCost`.)
+     final deterministic tie-break. (Part 4 adds a residency cost to the tier column — see Part 4.)
   5. Return `Decision { model, fallbacks (rest, ranked), reason }`.
 - **`Decision.reason`** — structured (`Vec<ReasonPart>`) with a `Display`
   impl producing one human sentence, e.g. *"vision required;
@@ -419,19 +422,53 @@ rule set a tier (free-form chat). Strict grammar output via the existing
 
 ## Part 4 — Resource-awareness
 
-- **Crate**: a `ResidencyCost` scoring term — bonus for loaded models,
-  size-proportional penalty for models needing a load, heavy (not
-  disqualifying) penalty for models that won't fit in free VRAM even after
-  evicting idle ones. Residency is **soft only**: it never overrides a hard
-  requirement and never outweighs operator `priority` by more than one
-  tier-step.
-- **Signal sources**: Ollama `/api/ps` (loaded + `size_vram`, no broker
-  needed); llama.cpp router-mode `/models` `status`; and a new read-only
-  `aivyx-broker` endpoint `GET /v1/aivyx/residency` returning loaded
-  model(s), free/total VRAM as reported by its backend, and slot pressure —
-  the one place both products see a shared GPU.
-- Residency data is refreshed on a short TTL (default 5s) — cheap endpoints,
-  still not queried per call.
+Split into **4a** (`aivyx-route` + `aivyx-broker`) and **4b** (product
+wiring) — decision 13.
+
+- **Crate — data**: `ResidencySnapshot { models: BTreeMap<ModelKey,
+  ModelResidency>, vram: Option<Vram>, slots: BTreeMap<EndpointRef,
+  SlotPressure> }` with `ModelResidency::{Loaded { vram_bytes },
+  NotLoaded { size_bytes }}` (both `Option<u64>`). I/O-free. Passed to
+  `select()` as `Policy.residency`; `Router::set_residency` stores the
+  latest one for `plan()`.
+- **Crate — scoring** (decision 12): `rank_key`'s tier column becomes
+  `tier_penalty × 4 + residency_cost`. Cost: no entry 2; `Loaded` 0;
+  `NotLoaded` with known size and available VRAM: > available ⇒ 4,
+  ≤ ¼ ⇒ 1, ≤ ½ ⇒ 2, else 3; otherwise 2. *Available* = total − (used −
+  VRAM held by the snapshot's loaded models), i.e. what a load could use
+  after evicting every loaded model. Residency is **soft only**: it never
+  affects hard filtering, stickiness or pins, and it is worth at most one
+  tier-step, ranked ahead of strengths and priority exactly as tier fit
+  is. An empty snapshot leaves every decision unchanged. A chosen model's
+  residency adds a reason clause ("already loaded" / "needs loading" /
+  "may not fit in free VRAM").
+- **Signal sources** (crate, `discovery` feature, `discovery::residency`):
+  Ollama `/api/ps` (loaded, `size_vram`) + `/api/tags` (`size`);
+  llama.cpp router `GET /models` `status.value` (`loaded`/`loading` ⇒
+  loaded, `unloaded`/`sleeping` ⇒ not loaded, no `status` ⇒ loaded —
+  single-model server); the broker (below). Brokers front a product's
+  *default* backend (never a `[routing.endpoints]` entry), so broker
+  residency is keyed to the default endpoint. An unreachable source
+  contributes nothing; `collect` never fails.
+- **VRAM** (decision 11): the broker reads the GPU (`nvidia-smi`, summed
+  across GPUs; else the AMD card with the largest
+  `mem_info_vram_total`; `--vram-source auto|nvidia|amd|none`). Without a
+  broker VRAM figure, `[routing] vram_bytes` supplies the total and used
+  = VRAM held by loaded models. One host-wide pool is assumed for all
+  local endpoints (multi-host is out of scope).
+- **Broker endpoint**: read-only `GET /v1/aivyx/residency` (loopback, no
+  auth, like the rest of the broker):
+  ```json
+  {"models":[{"id":"qwen3-8b","loaded":true}],
+   "vram":{"total_bytes":25769803776,"used_bytes":9663676416},
+   "slots":{"busy":1,"total":2}}
+  ```
+  `models` from the upstream `GET /models`; `vram` is `null` when
+  unknown; `slots` from the broker's scheduler. Slot pressure is reported
+  and parsed but not scored in 4a.
+- **Refresh (4b)**: products poll `collect` on a short TTL (default 5s)
+  in the background and hand the result to `Router::set_residency` —
+  never per call.
 
 ## Error handling
 
