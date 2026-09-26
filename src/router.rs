@@ -184,12 +184,12 @@ impl Router {
     }
 
     /// Pins `session`'s main thread (sticky task kinds) to `key`.
+    /// Any sticky model is dropped: it's unused while pinned, and would
+    /// otherwise resurface if the pin were later evicted by the session cap.
     pub fn pin(&self, session: &str, key: ModelKey) {
-        self.state
-            .lock()
-            .unwrap()
-            .pins
-            .insert(session.to_string(), key);
+        let mut state = self.state.lock().unwrap();
+        state.sticky.remove(session);
+        state.pins.insert(session.to_string(), key);
     }
 
     /// Clears `session`'s pin and sticky model, so its next main-thread
@@ -241,6 +241,9 @@ impl Router {
         if let Some(session) = &sticky_session
             && let Some(pin) = state.pins.get(session).cloned()
         {
+            // A pin in use stays recent, so the session cap evicts idle
+            // pins first.
+            state.pins.insert(session.clone(), pin.clone());
             let mut reason = format!("pinned to `{pin}`");
             if let Some(profile) = find(&state.profiles, &pin) {
                 let unmet: Vec<String> = unmet_needs(&req, profile)
@@ -403,6 +406,32 @@ mod tests {
         }
         assert_eq!(r.pinned("p1"), None);
         assert_eq!(r.pinned("p3"), Some(key("gpu", "tiny")));
+    }
+
+    #[test]
+    fn an_evicted_pin_never_resurfaces_an_older_sticky_model() {
+        let r = router(three()).with_max_sessions(1);
+        let t0 = Instant::now();
+        let plan = r.plan(&q(TaskKind::CodeEdit, Some("s")), t0).unwrap();
+        r.succeeded(&plan, &key("gpu", "big"), &[]);
+        r.pin("s", key("gpu", "tiny"));
+        r.pin("other", key("gpu", "tiny")); // evicts s's pin
+        assert_eq!(r.pinned("s"), None);
+        assert_eq!(r.current("s"), None, "no stale pre-pin sticky model");
+    }
+
+    #[test]
+    fn a_pin_in_use_stays_recent() {
+        let r = router(three()).with_max_sessions(2);
+        let t0 = Instant::now();
+        r.pin("busy", key("gpu", "tiny"));
+        r.pin("idle", key("gpu", "tiny"));
+        // Routing through busy's pin keeps it recent…
+        r.plan(&q(TaskKind::CodeEdit, Some("busy")), t0).unwrap();
+        r.pin("new", key("gpu", "tiny"));
+        // …so the idle pin goes, not the one in use.
+        assert_eq!(r.pinned("busy"), Some(key("gpu", "tiny")));
+        assert_eq!(r.pinned("idle"), None);
     }
 
     #[test]
