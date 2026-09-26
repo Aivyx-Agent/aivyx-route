@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod merge;
 pub mod profile;
 pub mod requirements;
+pub mod router;
 pub mod select;
 
 pub use config::{
@@ -25,4 +26,5 @@ pub use requirements::{
     HardNeed, HardRequirements, Requirements, RequirementsBuilder, SoftPreferences, TaskKind,
     TaskOverride, TaskOverrides,
 };
+pub use router::{DEFAULT_COOLDOWN, NoRoute, RoutePlan, RouteQuery, RouteRecord, Router};
 pub use select::{Decision, NoCandidate, Policy, ReasonPart, Unmet, find, select, unmet_needs};

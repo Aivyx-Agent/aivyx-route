@@ -109,6 +109,33 @@ let policy = Policy { sticky_model: Some(decision.model.key()), ..Policy::defaul
 `unmet_needs(&req, &profile)` and `find(&profiles, &key)` validate an
 explicit operator pin; config and decision types are `Serialize`.
 
+### Stateful routing
+
+`select` is pure and stateless; `Router` is the stateful layer both products
+wrap around it. It tracks per-session stickiness, operator pins, failure
+cooldowns, and each session's last decision, and stays synchronous and
+I/O-free — callers inject the clock (`now: Instant`) instead of the router
+reading it itself, so behavior is deterministic under test.
+
+```rust
+use aivyx_route::{Router, RouteQuery, TaskKind, TaskOverrides};
+use std::time::Instant;
+
+let router = Router::new(profiles, TaskOverrides::default());
+let query = RouteQuery { session: Some("s".into()), ..RouteQuery::new(TaskKind::Chat) };
+let plan = router.plan(&query, Instant::now())?;
+// ... call plan.chain[0], falling back through the rest on a retryable error ...
+let record = router.succeeded(&plan, &served_key, &failure_notes);
+```
+
+Semantics (operator-approved in model-routing Part 2):
+
+- cooling models (a recent `failed()`) are a last resort, never a reason to
+  fail a request;
+- a fallback, or a choice made while any model was cooling, never becomes a
+  session's sticky model;
+- a pin never writes the sticky map, and `unpin` clears it too.
+
 ## Development
 
 ```sh
