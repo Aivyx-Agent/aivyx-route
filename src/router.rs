@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::profile::{Availability, ModelKey, ModelProfile};
+use crate::profile::{Availability, ModelKey, ModelProfile, Tier};
 use crate::requirements::{Requirements, TaskKind, TaskOverrides};
 use crate::residency::ResidencySnapshot;
 use crate::select::{Policy, find, select, unmet_needs};
@@ -36,6 +36,8 @@ pub struct RouteQuery {
     pub vision: bool,
     /// Becomes the minimum context window; `0` = no requirement.
     pub estimated_prompt_tokens: u32,
+    /// A soft tier for this call (e.g. from the classifier); `None` = the task's default.
+    pub tier: Option<Tier>,
 }
 
 impl RouteQuery {
@@ -46,6 +48,7 @@ impl RouteQuery {
             tools: false,
             vision: false,
             estimated_prompt_tokens: 0,
+            tier: None,
         }
     }
 }
@@ -224,6 +227,9 @@ impl Router {
 
     pub fn plan(&self, query: &RouteQuery, now: Instant) -> Result<RoutePlan, NoRoute> {
         let mut builder = Requirements::builder().task(&query.task, &self.tasks);
+        if let Some(tier) = query.tier {
+            builder = builder.tier(tier);
+        }
         if query.tools {
             builder = builder.tools();
         }
@@ -691,5 +697,27 @@ mod tests {
             r.plan(&q(TaskKind::Chat, None), t0).unwrap().chain[0],
             key("gpu", "a")
         );
+    }
+
+    #[test]
+    fn a_soft_tier_override_chooses_by_tier() {
+        let r = router(three());
+        let now = Instant::now();
+        // Chat defaults to Medium, so it chooses default@backend.
+        let plan = r.plan(&q(TaskKind::Chat, None), now).unwrap();
+        assert_eq!(plan.chain[0], key("backend", "default"));
+        // With tier: Some(Large), it chooses big@gpu.
+        let query = RouteQuery {
+            tier: Some(Tier::Large),
+            ..q(TaskKind::Chat, None)
+        };
+        let plan = r.plan(&query, now).unwrap();
+        assert_eq!(plan.chain[0], key("gpu", "big"));
+    }
+
+    #[test]
+    fn route_query_new_has_no_tier() {
+        let query = RouteQuery::new(TaskKind::Chat);
+        assert_eq!(query.tier, None);
     }
 }
