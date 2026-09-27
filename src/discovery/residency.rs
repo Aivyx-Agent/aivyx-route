@@ -247,6 +247,7 @@ async fn llama_router(
 
 #[derive(Deserialize)]
 struct LemonadeHealth {
+    #[serde(default)]
     all_models_loaded: Vec<LemonadeLoaded>,
 }
 
@@ -266,8 +267,9 @@ struct LemonadeModel {
     id: String,
     #[serde(default)]
     downloaded: bool,
+    /// GB; absent means the size is unknown, not zero.
     #[serde(default)]
-    size: f64,
+    size: Option<f64>,
 }
 
 /// Lemonade holds one LLM at a time. `/v1/health` says which downloaded
@@ -288,7 +290,7 @@ async fn lemonade(
     if let Ok(models) = get_json::<LemonadeModels>(format!("{base}/v1/models"), client).await {
         for model in models.data {
             if model.downloaded && !out.iter().any(|(id, _)| *id == model.id) {
-                let size_bytes = Some((model.size * 1e9) as u64);
+                let size_bytes = model.size.map(|gb| (gb * 1e9).round() as u64);
                 out.push((model.id, ModelResidency::NotLoaded { size_bytes }));
             }
         }
@@ -596,6 +598,27 @@ mod tests {
             ModelResidency::NotLoaded {
                 size_bytes: Some(6_410_000_000)
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lemonade_model_without_a_size_has_an_unknown_size() {
+        let health = r#"{"status":"ok"}"#;
+        let models = r#"{"data":[{"id":"NoSize-GGUF","downloaded":true}]}"#;
+        let server = serve_lemonade(health, Some(models)).await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("lemonade"),
+                endpoint(EndpointKind::Lemonade, &server.uri()),
+            )],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("lemonade", "NoSize-GGUF")],
+            ModelResidency::NotLoaded { size_bytes: None }
         );
     }
 
