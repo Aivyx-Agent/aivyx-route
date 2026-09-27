@@ -47,7 +47,7 @@ enabled = true            # false or absent ⇒ today's single-model behavior
 discover = true
 
 [routing.endpoints.ollama-main]
-kind = "ollama"           # ollama | llama_router | openai_compat | anthropic | openai
+kind = "ollama"           # ollama | llama_router | openai_compat | lemonade | anthropic | openai
 base_url = "http://localhost:11434"
 
 [[routing.models]]
@@ -84,8 +84,10 @@ as cloud and unavailable, so they are never selected.
 local endpoints with no `base_url`; products warn at startup.
 
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
-`/api/show`, llama-server router mode's `/models`, and `/v1/models` on any
-OpenAI-compatible server. Cloud endpoints are never probed. Tiers and
+`/api/show`, llama-server router mode's `/models`, `/v1/models` on any
+OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded
+models only; its `labels` map to capabilities, but it never reports
+thinking or audio support). Cloud endpoints are never probed. Tiers and
 strengths always come from the roster — no backend reports quality.
 Ollama's discovered context window is the model's *trained* length, not
 the `num_ctx` it is served with: set the roster `context_window` to your
@@ -158,13 +160,16 @@ replaces the snapshot the router's `plan` scores with; a product refreshes
 it, it doesn't rebuild the router.
 
 `discovery::residency::collect` (feature `discovery`) builds a snapshot
-from up to three signals: Ollama's `/api/ps` + `/api/tags`, llama-server
-router mode's `/models`, and an `aivyx-broker` reporting a product's
-default backend, VRAM and slot pressure — the broker's VRAM wins when
-present. `[routing] vram_bytes` is the operator's own VRAM figure, used as
-the total only when nothing else reports one. `collect` is meant to be
-polled on a short TTL (5s), never per request — like discovery, it's I/O,
-so it stays behind the `discovery` feature.
+from up to four signals: Ollama's `/api/ps` + `/api/tags`, llama-server
+router mode's `/models`, Lemonade Server's `/v1/health` + `/v1/models`
+(the loaded model is `Loaded`, every other downloaded model is
+`NotLoaded` with its size; a Lemonade endpoint is never marked resident,
+since it holds only one model at a time), and an `aivyx-broker` reporting
+a product's default backend, VRAM and slot pressure — the broker's VRAM
+wins when present. `[routing] vram_bytes` is the operator's own VRAM
+figure, used as the total only when nothing else reports one. `collect`
+is meant to be polled on a short TTL (5s), never per request — like
+discovery, it's I/O, so it stays behind the `discovery` feature.
 
 Ollama reports a tagless model as `name:latest`; each such entry also
 answers to the bare `name` (what `ollama run` accepts and operators often

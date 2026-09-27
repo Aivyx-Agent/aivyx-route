@@ -1,0 +1,32 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "Qwen3-4B-Instruct-2507-GGUF",
+      "labels": ["chat", "tool-calling"],
+      "context_length": 262144,
+      "max_context_window": 262144,
+      "size": 2.33,
+      "downloaded": true,
+      "recipe": "llamacpp"
+    },
+    {
+      "id": "Qwen3.5-9B-GGUF",
+      "labels": ["chat", "vision", "tool-calling"],
+      "context_length": 262144,
+      "max_context_window": 262144,
+      "size": 6.41,
+      "downloaded": true,
+      "recipe": "llamacpp"
+    },
+    {
+      "id": "Gemma-3-1B-GGUF",
+      "labels": ["chat"],
+      "context_length": 32768,
+      "max_context_window": 32768,
+      "size": 0.8,
+      "downloaded": false,
+      "recipe": "llamacpp"
+    }
+  ]
+}

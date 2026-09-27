@@ -126,6 +126,8 @@ pub enum EndpointKind {
     /// Anything serving `GET /v1/models` (single-model llama-server, Jan,
     /// vLLM, …).
     OpenaiCompat,
+    /// Lemonade Server: single-LLM-at-a-time, with its own residency API.
+    Lemonade,
     Anthropic,
     Openai,
 }
@@ -134,9 +136,10 @@ impl EndpointKind {
     pub fn locality(self) -> Locality {
         match self {
             EndpointKind::Anthropic | EndpointKind::Openai => Locality::Cloud,
-            EndpointKind::Ollama | EndpointKind::LlamaRouter | EndpointKind::OpenaiCompat => {
-                Locality::Local
-            }
+            EndpointKind::Ollama
+            | EndpointKind::LlamaRouter
+            | EndpointKind::OpenaiCompat
+            | EndpointKind::Lemonade => Locality::Local,
         }
     }
 
@@ -144,6 +147,7 @@ impl EndpointKind {
         match self {
             EndpointKind::Ollama => Some("http://localhost:11434"),
             EndpointKind::LlamaRouter => Some("http://localhost:8080"),
+            EndpointKind::Lemonade => Some("http://127.0.0.1:13305/api"),
             EndpointKind::OpenaiCompat | EndpointKind::Anthropic | EndpointKind::Openai => None,
         }
     }
@@ -304,6 +308,18 @@ summarize = { tier = "small" }
         assert_eq!(ep.base_url(), Some("http://localhost:8080"));
         let ep: EndpointConfig = toml::from_str("kind = \"openai_compat\"").unwrap();
         assert_eq!(ep.base_url(), None);
+    }
+
+    #[test]
+    fn lemonade_is_local_with_its_own_default_port() {
+        assert_eq!(EndpointKind::Lemonade.locality(), Locality::Local);
+        assert_eq!(
+            EndpointKind::Lemonade.default_base_url(),
+            Some("http://127.0.0.1:13305/api")
+        );
+        let ep: EndpointConfig = toml::from_str("kind = \"lemonade\"").unwrap();
+        assert_eq!(ep.kind, EndpointKind::Lemonade);
+        assert_eq!(ep.base_url(), Some("http://127.0.0.1:13305/api"));
     }
 
     #[test]

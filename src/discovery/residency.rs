@@ -47,6 +47,7 @@ pub async fn collect(
         let models = match endpoint.kind {
             EndpointKind::Ollama => ollama(base, client).await,
             EndpointKind::LlamaRouter => llama_router(base, client).await,
+            EndpointKind::Lemonade => lemonade(base, client).await,
             // Nothing to ask: single-model OpenAI-compatible servers and
             // cloud endpoints report no residency.
             EndpointKind::OpenaiCompat | EndpointKind::Anthropic | EndpointKind::Openai => {
@@ -245,6 +246,57 @@ async fn llama_router(
 }
 
 #[derive(Deserialize)]
+struct LemonadeHealth {
+    all_models_loaded: Vec<LemonadeLoaded>,
+}
+
+#[derive(Deserialize)]
+struct LemonadeLoaded {
+    model_name: String,
+    loaded: bool,
+}
+
+#[derive(Deserialize)]
+struct LemonadeModels {
+    data: Vec<LemonadeModel>,
+}
+
+#[derive(Deserialize)]
+struct LemonadeModel {
+    id: String,
+    #[serde(default)]
+    downloaded: bool,
+    #[serde(default)]
+    size: f64,
+}
+
+/// Lemonade holds one LLM at a time. `/v1/health` says which downloaded
+/// model (if any) is loaded; `/v1/models` supplies the size of every other
+/// downloaded model, needing a load. A `/v1/models` failure still leaves
+/// the loaded model's entry, from health alone.
+async fn lemonade(
+    base: &str,
+    client: &reqwest::Client,
+) -> Result<Vec<(String, ModelResidency)>, reqwest::Error> {
+    let health: LemonadeHealth = get_json(format!("{base}/v1/health"), client).await?;
+    let mut out: Vec<(String, ModelResidency)> = health
+        .all_models_loaded
+        .into_iter()
+        .filter(|m| m.loaded)
+        .map(|m| (m.model_name, ModelResidency::Loaded { vram_bytes: None }))
+        .collect();
+    if let Ok(models) = get_json::<LemonadeModels>(format!("{base}/v1/models"), client).await {
+        for model in models.data {
+            if model.downloaded && !out.iter().any(|(id, _)| *id == model.id) {
+                let size_bytes = Some((model.size * 1e9) as u64);
+                out.push((model.id, ModelResidency::NotLoaded { size_bytes }));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Deserialize)]
 struct BrokerReport {
     models: Vec<BrokerModel>,
     #[serde(default)]
@@ -293,6 +345,8 @@ mod tests {
     const PS: &str = include_str!("../../tests/fixtures/ollama_ps.json");
     const ROUTER: &str = include_str!("../../tests/fixtures/llama_router_models_status.json");
     const BROKER: &str = include_str!("../../tests/fixtures/broker_residency.json");
+    const LEMONADE_MODELS: &str = include_str!("../../tests/fixtures/lemonade_models.json");
+    const LEMONADE_HEALTH: &str = include_str!("../../tests/fixtures/lemonade_health.json");
 
     fn json_response(body: &str) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_raw(body.to_owned(), "application/json")
@@ -464,6 +518,112 @@ mod tests {
         );
     }
 
+    async fn serve_lemonade(health: &str, models: Option<&str>) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/health"))
+            .respond_with(json_response(health))
+            .mount(&server)
+            .await;
+        if let Some(models) = models {
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .respond_with(json_response(models))
+                .mount(&server)
+                .await;
+        }
+        server
+    }
+
+    #[tokio::test]
+    async fn lemonade_loaded_model_is_loaded_and_the_rest_need_loading() {
+        let server = serve_lemonade(LEMONADE_HEALTH, Some(LEMONADE_MODELS)).await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("lemonade"),
+                endpoint(EndpointKind::Lemonade, &server.uri()),
+            )],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3-4B-Instruct-2507-GGUF")],
+            ModelResidency::Loaded { vram_bytes: None }
+        );
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3.5-9B-GGUF")],
+            ModelResidency::NotLoaded {
+                size_bytes: Some(6_410_000_000)
+            }
+        );
+        assert!(
+            !snap
+                .models
+                .contains_key(&key("lemonade", "Gemma-3-1B-GGUF")),
+            "an undownloaded model must never appear"
+        );
+        assert!(
+            snap.resident_endpoints.is_empty(),
+            "a Lemonade endpoint is never marked resident"
+        );
+    }
+
+    #[tokio::test]
+    async fn lemonade_with_nothing_loaded_makes_every_model_notloaded() {
+        let health =
+            r#"{"model_loaded":null,"all_models_loaded":[],"max_models":{"llm":1},"status":"ok"}"#;
+        let server = serve_lemonade(health, Some(LEMONADE_MODELS)).await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("lemonade"),
+                endpoint(EndpointKind::Lemonade, &server.uri()),
+            )],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3-4B-Instruct-2507-GGUF")],
+            ModelResidency::NotLoaded {
+                size_bytes: Some(2_330_000_000)
+            }
+        );
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3.5-9B-GGUF")],
+            ModelResidency::NotLoaded {
+                size_bytes: Some(6_410_000_000)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lemonade_models_failure_with_good_health_still_marks_the_loaded_one_loaded() {
+        // No /v1/models mock: wiremock answers 404.
+        let server = serve_lemonade(LEMONADE_HEALTH, None).await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("lemonade"),
+                endpoint(EndpointKind::Lemonade, &server.uri()),
+            )],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3-4B-Instruct-2507-GGUF")],
+            ModelResidency::Loaded { vram_bytes: None }
+        );
+        assert!(
+            !snap
+                .models
+                .contains_key(&key("lemonade", "Qwen3.5-9B-GGUF"))
+        );
+    }
+
     #[tokio::test]
     async fn the_broker_reports_the_default_endpoint_vram_and_slots() {
         let server = serve("/v1/aivyx/residency", BROKER).await;
@@ -632,6 +792,10 @@ mod tests {
                 (
                     EndpointRef::new("compat"),
                     endpoint(EndpointKind::OpenaiCompat, "http://127.0.0.1:1"),
+                ),
+                (
+                    EndpointRef::new("lemonade"),
+                    endpoint(EndpointKind::Lemonade, "http://127.0.0.1:1"),
                 ),
                 (
                     EndpointRef::new("cloud"),

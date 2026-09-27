@@ -3,6 +3,7 @@
 //! explicit refresh only — never per request. Never fails the caller:
 //! problems become `DiscoveryOutcome::Unreachable`.
 
+mod lemonade;
 mod llama_router;
 mod ollama;
 mod openai_compat;
@@ -39,6 +40,7 @@ pub async fn discover(
                 let result = match kind {
                     EndpointKind::Ollama => ollama::discover(base, client).await,
                     EndpointKind::LlamaRouter => llama_router::discover(base, client).await,
+                    EndpointKind::Lemonade => lemonade::discover(base, client).await,
                     _ => openai_compat::discover(base, client).await,
                 };
                 match result {

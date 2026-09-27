@@ -1,0 +1,22 @@
+{
+  "model_loaded": "Qwen3-4B-Instruct-2507-GGUF",
+  "all_models_loaded": [
+    {
+      "model_name": "Qwen3-4B-Instruct-2507-GGUF",
+      "loaded": true,
+      "is_busy": false,
+      "type": "llm",
+      "device": "gpu"
+    }
+  ],
+  "max_models": {
+    "classification": 1,
+    "embedding": 1,
+    "image": 1,
+    "llm": 1,
+    "reranking": 1,
+    "transcription": 1,
+    "tts": 1
+  },
+  "status": "ok"
+}
