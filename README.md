@@ -86,8 +86,10 @@ local endpoints with no `base_url`; products warn at startup.
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
 `/api/show`, llama-server router mode's `/models`, `/v1/models` on any
 OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded
-models only; its `labels` map to capabilities, but it never reports
-thinking or audio support). Cloud endpoints are never probed. Tiers and
+models only; its `labels` map to capabilities — `reasoning` marks a
+thinking model, but an unlabelled one may still think, so thinking is
+otherwise unknown, as is audio; the base is `.../api`, and a trailing
+`/v1` is tolerated). Cloud endpoints are never probed. Tiers and
 strengths always come from the roster — no backend reports quality.
 Ollama's discovered context window is the model's *trained* length, not
 the `num_ctx` it is served with: set the roster `context_window` to your

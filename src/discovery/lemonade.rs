@@ -1,6 +1,7 @@
 //! Lemonade Server: `GET /v1/models` lists the catalog (downloaded models
-//! only); its `labels` map onto capabilities. Lemonade never reports
-//! thinking or audio support, so those stay unknown regardless of labels.
+//! only); its `labels` map onto capabilities. A `reasoning` label means the
+//! model thinks, but not every thinking model carries it, so without it
+//! thinking stays unknown. Audio is never labelled and stays unknown.
 
 use serde::Deserialize;
 
@@ -29,7 +30,7 @@ pub(super) async fn discover(
     client: &reqwest::Client,
 ) -> Result<Vec<DiscoveredModel>, reqwest::Error> {
     let models: Models = client
-        .get(format!("{base}/v1/models"))
+        .get(api_url(base, "models"))
         .timeout(REQUEST_TIMEOUT)
         .send()
         .await?
@@ -40,13 +41,36 @@ pub(super) async fn discover(
         .data
         .into_iter()
         .filter(|entry| entry.downloaded)
-        .map(|entry| DiscoveredModel {
-            id: entry.id,
-            capabilities: parse_capabilities(&entry.labels),
-            unknown_capabilities: [Capability::Thinking, Capability::Audio].into(),
-            context_window: entry.context_length,
+        .map(|entry| {
+            let (capabilities, unknown_capabilities) = capabilities(&entry.labels);
+            DiscoveredModel {
+                id: entry.id,
+                capabilities,
+                unknown_capabilities,
+                context_window: entry.context_length,
+            }
         })
         .collect())
+}
+
+/// `{base}/v1/{path}` for a Lemonade base given as `.../api` (the
+/// documented form) or, tolerated, `.../api/v1`.
+pub(super) fn api_url(base: &str, path: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{base}/v1/{path}")
+}
+
+/// Known-present and unknown capabilities from Lemonade's labels.
+fn capabilities(labels: &[String]) -> (CapabilitySet, CapabilitySet) {
+    let mut present = parse_capabilities(labels);
+    let mut unknown = CapabilitySet::from([Capability::Audio]);
+    if labels.iter().any(|l| l == "reasoning") {
+        present.insert(Capability::Thinking);
+    } else {
+        unknown.insert(Capability::Thinking);
+    }
+    (present, unknown)
 }
 
 fn parse_capabilities(labels: &[String]) -> CapabilitySet {
@@ -145,5 +169,58 @@ mod tests {
             parse_capabilities(&raw),
             CapabilitySet::from([Capability::Embedding])
         );
+    }
+
+    #[test]
+    fn a_reasoning_label_marks_the_model_as_thinking() {
+        let raw = vec!["chat".to_string(), "reasoning".to_string()];
+        let (caps, unknown) = capabilities(&raw);
+        assert_eq!(
+            caps,
+            CapabilitySet::from([Capability::Completion, Capability::Thinking])
+        );
+        assert_eq!(unknown, CapabilitySet::from([Capability::Audio]));
+    }
+
+    #[test]
+    fn without_a_reasoning_label_thinking_stays_unknown() {
+        // Qwen3.5-9B thinks but carries no `reasoning` label.
+        let raw = vec!["chat".to_string()];
+        let (caps, unknown) = capabilities(&raw);
+        assert_eq!(caps, CapabilitySet::from([Capability::Completion]));
+        assert_eq!(
+            unknown,
+            CapabilitySet::from([Capability::Thinking, Capability::Audio])
+        );
+    }
+
+    #[test]
+    fn api_url_accepts_bases_with_or_without_v1() {
+        for base in [
+            "http://h:13305/api",
+            "http://h:13305/api/",
+            "http://h:13305/api/v1",
+            "http://h:13305/api/v1/",
+        ] {
+            assert_eq!(
+                api_url(base, "models"),
+                "http://h:13305/api/v1/models",
+                "{base}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_works_on_a_base_ending_in_v1() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(json_response(MODELS))
+            .mount(&server)
+            .await;
+        let models = discover(&format!("{}/api/v1", server.uri()), &reqwest::Client::new())
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 2);
     }
 }

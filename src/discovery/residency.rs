@@ -254,7 +254,14 @@ struct LemonadeHealth {
 #[derive(Deserialize)]
 struct LemonadeLoaded {
     model_name: String,
+    /// Everything listed is loaded; default so a release that drops the
+    /// field still parses.
+    #[serde(default = "loaded_by_default")]
     loaded: bool,
+}
+
+fn loaded_by_default() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -280,14 +287,16 @@ async fn lemonade(
     base: &str,
     client: &reqwest::Client,
 ) -> Result<Vec<(String, ModelResidency)>, reqwest::Error> {
-    let health: LemonadeHealth = get_json(format!("{base}/v1/health"), client).await?;
+    let health: LemonadeHealth = get_json(super::lemonade::api_url(base, "health"), client).await?;
     let mut out: Vec<(String, ModelResidency)> = health
         .all_models_loaded
         .into_iter()
         .filter(|m| m.loaded)
         .map(|m| (m.model_name, ModelResidency::Loaded { vram_bytes: None }))
         .collect();
-    if let Ok(models) = get_json::<LemonadeModels>(format!("{base}/v1/models"), client).await {
+    if let Ok(models) =
+        get_json::<LemonadeModels>(super::lemonade::api_url(base, "models"), client).await
+    {
         for model in models.data {
             if model.downloaded && !out.iter().any(|(id, _)| *id == model.id) {
                 let size_bytes = model.size.map(|gb| (gb * 1e9).round() as u64);
@@ -592,6 +601,43 @@ mod tests {
             ModelResidency::NotLoaded {
                 size_bytes: Some(2_330_000_000)
             }
+        );
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3.5-9B-GGUF")],
+            ModelResidency::NotLoaded {
+                size_bytes: Some(6_410_000_000)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lemonade_residency_works_on_a_base_ending_in_v1_and_without_a_loaded_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/health"))
+            .respond_with(json_response(
+                r#"{"all_models_loaded":[{"model_name":"Qwen3-4B-Instruct-2507-GGUF"}]}"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/models"))
+            .respond_with(json_response(LEMONADE_MODELS))
+            .mount(&server)
+            .await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("lemonade"),
+                endpoint(EndpointKind::Lemonade, &format!("{}/api/v1", server.uri())),
+            )],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(
+            snap.models[&key("lemonade", "Qwen3-4B-Instruct-2507-GGUF")],
+            ModelResidency::Loaded { vram_bytes: None }
         );
         assert_eq!(
             snap.models[&key("lemonade", "Qwen3.5-9B-GGUF")],
