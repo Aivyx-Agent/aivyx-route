@@ -6,7 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::profile::{Strength, Tier};
+use crate::profile::{Capability, CapabilitySet, Strength, Tier};
 
 /// One hard requirement; a model failing any is never selected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -67,6 +67,11 @@ impl HardRequirements {
 pub struct SoftPreferences {
     pub tier: Option<Tier>,
     pub strengths: BTreeSet<Strength>,
+    /// Capabilities to steer away from: a model KNOWN to have one ranks
+    /// below every model that doesn't (ahead of tier fit), but is never
+    /// excluded. `Classify` avoids `Thinking`: a reasoning model spends
+    /// its tiny token budget thinking and never answers.
+    pub avoid: CapabilitySet,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -172,9 +177,14 @@ impl TaskKind {
             TaskKind::Embed => (None, &[]),
             TaskKind::Custom(_) => (Some(Tier::Medium), &[]),
         };
+        let avoid = match self {
+            TaskKind::Classify => CapabilitySet::from([Capability::Thinking]),
+            _ => CapabilitySet::new(),
+        };
         SoftPreferences {
             tier,
             strengths: strengths.iter().copied().collect(),
+            avoid,
         }
     }
 

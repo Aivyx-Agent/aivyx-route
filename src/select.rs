@@ -268,6 +268,7 @@ fn tier_penalty(wanted: Option<Tier>, got: Tier) -> u8 {
 type RankKey = (
     bool,
     bool,
+    bool,
     u16,
     Reverse<usize>,
     Reverse<i32>,
@@ -278,10 +279,14 @@ type RankKey = (
 fn rank_key(p: &ModelProfile, req: &Requirements, residency: &ResidencySnapshot) -> RankKey {
     let relies_on_unknown_caps = !assumed_capabilities(p, &req.hard.needs()).is_empty();
     let unknown_ctx = req.hard.min_context.is_some() && p.context_window.is_none();
+    // Soft: a model known to have an avoided capability ranks below every
+    // model that doesn't, ahead of tier fit, but stays a candidate.
+    let avoided = !p.capabilities.is_disjoint(&req.soft.avoid);
     let overlap = p.strengths.intersection(&req.soft.strengths).count();
     (
         relies_on_unknown_caps,
         unknown_ctx,
+        avoided,
         u16::from(tier_penalty(req.soft.tier, p.tier)) * TIER_STEP + residency.cost(p).0,
         Reverse(overlap),
         Reverse(p.priority),
@@ -402,6 +407,66 @@ mod tests {
 
     fn fallback_ids(d: &Decision) -> Vec<&str> {
         d.fallbacks.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn classify_prefers_a_model_that_does_not_think() {
+        // `a-thinker` sorts first; without the avoid it would win.
+        let req = for_task(TaskKind::Classify).build();
+        let c = [
+            with_caps(m("a-thinker", Tier::Small), &[Capability::Thinking]),
+            m("b-plain", Tier::Small),
+        ];
+        assert_eq!(
+            select(&req, &c, &Policy::default()).unwrap().model.id,
+            "b-plain"
+        );
+    }
+
+    #[test]
+    fn avoiding_thinking_outranks_tier_fit_but_never_excludes() {
+        let req = for_task(TaskKind::Classify).build();
+        // A plain Medium model beats a thinking Small one for classify.
+        let c = [
+            with_caps(m("a-thinker", Tier::Small), &[Capability::Thinking]),
+            m("b-plain", Tier::Medium),
+        ];
+        assert_eq!(
+            select(&req, &c, &Policy::default()).unwrap().model.id,
+            "b-plain"
+        );
+        // With only a thinking model, it is still chosen (soft).
+        let only = [with_caps(
+            m("thinker", Tier::Small),
+            &[Capability::Thinking],
+        )];
+        assert_eq!(
+            select(&req, &only, &Policy::default()).unwrap().model.id,
+            "thinker"
+        );
+    }
+
+    #[test]
+    fn only_known_thinking_is_avoided_and_other_tasks_are_unaffected() {
+        // Unknown thinking isn't penalised.
+        let mut unknown = m("a-unknown", Tier::Small);
+        unknown.unknown_capabilities.insert(Capability::Thinking);
+        let req = for_task(TaskKind::Classify).build();
+        let c = [unknown, m("b-plain", Tier::Small)];
+        assert_eq!(
+            select(&req, &c, &Policy::default()).unwrap().model.id,
+            "a-unknown"
+        );
+        // Summarize doesn't avoid thinking.
+        let req = for_task(TaskKind::Summarize).build();
+        let c = [
+            with_caps(m("a-thinker", Tier::Small), &[Capability::Thinking]),
+            m("b-plain", Tier::Small),
+        ];
+        assert_eq!(
+            select(&req, &c, &Policy::default()).unwrap().model.id,
+            "a-thinker"
+        );
     }
 
     #[test]

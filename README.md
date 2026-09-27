@@ -14,8 +14,12 @@ it picks one deterministically and says why.
    `code_edit`, `plan`, `judge`, `summarize`, `compact`, `classify`,
    `embed`, or a custom name) maps to a preferred tier and strengths.
    Ranking: known capabilities first, then known-sufficient context, then
-   tier fit, strength overlap, operator `priority`, and finally endpoint and
-   model id.
+   avoided capabilities, then tier fit, strength overlap, operator
+   `priority`, and finally endpoint and model id. `classify` avoids models
+   known to think (declare `capabilities = ["thinking"]` for a reasoning
+   model the backend doesn't report): a reasoning model spends the
+   classifier's few tokens thinking and never answers. Avoided models are
+   still used when nothing else qualifies.
 3. **Stickiness.** The product passes the conversation's current model; it
    is kept whenever it still meets every hard need.
 
