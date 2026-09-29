@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::profile::{Availability, ModelKey, ModelProfile, Tier};
+use crate::profile::{Availability, Locality, ModelKey, ModelProfile, Tier};
 use crate::requirements::{Requirements, TaskKind, TaskOverrides};
 use crate::residency::ResidencySnapshot;
 use crate::select::{Policy, find, select, unmet_needs};
@@ -250,15 +250,22 @@ impl Router {
             // A pin in use stays recent, so the session cap evicts idle
             // pins first.
             state.pins.insert(session.clone(), pin.clone());
+            // Pins win, but a mismatch is flagged rather than hidden.
             let mut reason = format!("pinned to `{pin}`");
-            if let Some(profile) = find(&state.profiles, &pin) {
-                let unmet: Vec<String> = unmet_needs(&req, profile)
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                if !unmet.is_empty() {
-                    reason.push_str(&format!("; warning: it may lack {}", unmet.join(", ")));
+            match find(&state.profiles, &pin) {
+                Some(profile) => {
+                    let unmet: Vec<String> = unmet_needs(&req, profile)
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect();
+                    if !unmet.is_empty() {
+                        reason.push_str(&format!("; warning: it may lack {}", unmet.join(", ")));
+                    }
+                    if profile.locality == Locality::Cloud && !self.allow_cloud {
+                        reason.push_str("; warning: it's a cloud model and cloud routing is off");
+                    }
                 }
+                None => reason.push_str("; warning: it isn't among the current candidates"),
             }
             return Ok(RoutePlan {
                 chain: vec![pin],
@@ -352,7 +359,7 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{Capability, EndpointRef, Locality, Tier};
+    use crate::profile::{Capability, EndpointRef, Tier};
     use crate::residency::{ModelResidency, ResidencySnapshot};
 
     fn key(endpoint: &str, id: &str) -> ModelKey {
@@ -601,6 +608,50 @@ mod tests {
         r.unpin("s");
         assert_eq!(r.current("s"), None);
         assert_eq!(r.plan(&query, now).unwrap().chain[0], key("gpu", "big"));
+    }
+
+    #[test]
+    fn a_pin_to_a_model_that_is_no_longer_a_candidate_is_kept_but_flagged() {
+        // Pins win (never silently overridden), but a refresh that drops the
+        // pinned model must not leave a clean-looking reason behind.
+        let r = router(three());
+        r.pin("s", key("gpu", "tiny"));
+        r.set_profiles(vec![p("backend", "default", Tier::Medium, &[])]);
+        let plan = r
+            .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
+            .unwrap();
+        assert_eq!(plan.chain, vec![key("gpu", "tiny")]);
+        assert!(
+            plan.reason
+                .contains("warning: it isn't among the current candidates"),
+            "{}",
+            plan.reason
+        );
+    }
+
+    #[test]
+    fn a_pin_to_a_cloud_model_is_flagged_while_cloud_routing_is_off() {
+        let mut profiles = three();
+        let mut cloud = p("anthropic", "claude", Tier::Large, &[]);
+        cloud.locality = Locality::Cloud;
+        profiles.push(cloud);
+        let r = router(profiles.clone());
+        r.pin("s", key("anthropic", "claude"));
+        let plan = r
+            .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
+            .unwrap();
+        assert_eq!(plan.chain, vec![key("anthropic", "claude")]);
+        assert!(
+            plan.reason.contains("warning: it's a cloud model"),
+            "{}",
+            plan.reason
+        );
+        let allowed = router(profiles).with_allow_cloud(true);
+        allowed.pin("s", key("anthropic", "claude"));
+        let plan = allowed
+            .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
+            .unwrap();
+        assert!(!plan.reason.contains("warning"), "{}", plan.reason);
     }
 
     #[test]
