@@ -96,6 +96,9 @@ its kind:
 - `locality = "local"` on the endpoint marks a box on your network with a
   public-looking DNS name local; `locality = "cloud"` forces cloud. Neither
   makes a cloud kind local.
+- A roster entry's `locality = "cloud"` marks that one model cloud. Its
+  `locality = "local"` never makes a model on a cloud endpoint local: it is
+  ignored and reported.
 
 ```toml
 [routing.endpoints.gpu]

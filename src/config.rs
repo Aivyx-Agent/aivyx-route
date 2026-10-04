@@ -116,6 +116,20 @@ impl fmt::Display for ConfigIssue {
 }
 
 impl RoutingConfig {
+    /// The locality of the endpoint named `name`: the default endpoint's
+    /// kind's, or a `[routing.endpoints]` entry's
+    /// [`effective_locality`](EndpointConfig::effective_locality). `None`
+    /// for a name that is neither (callers fail closed to `Cloud`).
+    pub fn endpoint_locality(&self, default: &DefaultEndpoint, name: &str) -> Option<Locality> {
+        if name == default.name.as_str() {
+            Some(default.kind.locality())
+        } else {
+            self.endpoints
+                .get(name)
+                .map(EndpointConfig::effective_locality)
+        }
+    }
+
     /// Report configuration mistakes. Pure; endpoint issues come first (in
     /// name order), then roster issues (in roster order).
     pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
@@ -151,11 +165,18 @@ impl RoutingConfig {
                 .endpoint
                 .clone()
                 .unwrap_or_else(|| default.name.as_str().to_owned());
-            if endpoint != default.name.as_str() && !self.endpoints.contains_key(&endpoint) {
-                issues.push(ConfigIssue::UnknownEndpoint {
+            match self.endpoint_locality(default, &endpoint) {
+                None => issues.push(ConfigIssue::UnknownEndpoint {
                     model: entry.id.clone(),
                     endpoint: endpoint.clone(),
-                });
+                }),
+                Some(Locality::Cloud) if entry.locality == Some(Locality::Local) => {
+                    issues.push(ConfigIssue::LocalOverrideIgnored {
+                        endpoint: endpoint.clone(),
+                        model: Some(entry.id.clone()),
+                    });
+                }
+                Some(_) => {}
             }
             if !seen.insert((endpoint.clone(), entry.id.clone())) {
                 issues.push(ConfigIssue::DuplicateModel {
@@ -250,7 +271,9 @@ pub struct RosterEntry {
     /// Key of `[routing.endpoints]`; `None` = the product's default backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// Overrides the locality implied by the endpoint kind.
+    /// `cloud` marks this model cloud even on a local endpoint. `local`
+    /// never makes a model on a cloud endpoint local (it is ignored, and
+    /// [`RoutingConfig::validate`] reports it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -585,6 +608,78 @@ base_url = "http://192.168.1.20:11434"
             text[1].contains("`api.groq.com`") && text[1].contains("locality = \"local\""),
             "{}",
             text[1]
+        );
+    }
+
+    #[test]
+    fn validate_reports_a_roster_local_override_on_a_cloud_endpoint() {
+        let c = toml::from_str::<Doc>(
+            r#"
+[routing.endpoints.claude]
+kind = "anthropic"
+
+[routing.endpoints.groq]
+kind = "openai_compat"
+base_url = "https://api.groq.com/openai/v1"
+locality = "cloud"
+
+[[routing.models]]
+id = "claude-sonnet"
+endpoint = "claude"
+locality = "local"
+
+[[routing.models]]
+id = "llama"
+endpoint = "groq"
+locality = "local"
+
+[[routing.models]]
+id = "fine"
+locality = "local"
+
+[[routing.models]]
+id = "typo"
+endpoint = "olama"
+locality = "local"
+"#,
+        )
+        .unwrap()
+        .routing;
+        let issues = c.validate(&local_default());
+        assert_eq!(
+            issues,
+            vec![
+                ConfigIssue::LocalOverrideIgnored {
+                    endpoint: "claude".into(),
+                    model: Some("claude-sonnet".into())
+                },
+                ConfigIssue::LocalOverrideIgnored {
+                    endpoint: "groq".into(),
+                    model: Some("llama".into())
+                },
+                ConfigIssue::UnknownEndpoint {
+                    model: "typo".into(),
+                    endpoint: "olama".into()
+                },
+            ]
+        );
+        assert_eq!(
+            issues[0].to_string(),
+            "model `claude-sonnet` is on cloud endpoint `claude`; its `locality = \"local\"` is ignored"
+        );
+        let cloud_default = DefaultEndpoint {
+            name: EndpointRef::new("main"),
+            kind: EndpointKind::Anthropic,
+        };
+        let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
+            .unwrap()
+            .routing;
+        assert_eq!(
+            c.validate(&cloud_default),
+            vec![ConfigIssue::LocalOverrideIgnored {
+                endpoint: "main".into(),
+                model: Some("x".into())
+            }]
         );
     }
 

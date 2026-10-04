@@ -39,8 +39,10 @@ pub struct DiscoveryReport {
 /// roster entries, plus roster-only models. Sorted by `(endpoint, id)`.
 ///
 /// An endpoint that is neither `default` nor a `[routing.endpoints]` key
-/// fails closed: its models are `Cloud` and `Unavailable`. An explicit
-/// roster `locality` still overrides the locality, never the availability.
+/// fails closed: its models are `Cloud` and `Unavailable`. Locality comes
+/// from [`RoutingConfig::endpoint_locality`]; a roster `locality = "cloud"`
+/// makes a model cloud, but a roster `locality = "local"` never makes one
+/// local, and neither changes availability.
 ///
 /// Duplicate roster entries for the same (endpoint, id) apply in order, each
 /// overriding only the fields it sets; a capability denied by any of them is
@@ -62,14 +64,9 @@ pub fn merge(
     // `EndpointConfig::effective_locality`). Unknown endpoints fail closed:
     // a typo must never make a cloud model look local.
     let endpoint_locality = |ep: &EndpointRef| {
-        if *ep == default.name {
-            default.kind.locality()
-        } else {
-            config
-                .endpoints
-                .get(ep.as_str())
-                .map_or(Locality::Cloud, |c| c.effective_locality())
-        }
+        config
+            .endpoint_locality(default, ep.as_str())
+            .unwrap_or(Locality::Cloud)
     };
     let outcome_of = |ep: &EndpointRef| {
         reports
@@ -160,8 +157,10 @@ pub fn merge(
         if let Some(priority) = entry.priority {
             p.priority = priority;
         }
-        if let Some(locality) = entry.locality {
-            p.locality = locality;
+        // Only towards cloud: a roster entry must never make a model on a
+        // cloud endpoint look local.
+        if entry.locality == Some(Locality::Cloud) {
+            p.locality = Locality::Cloud;
         }
         p.source.in_roster = true;
     }
@@ -757,8 +756,54 @@ base_url = "http://192.168.1.20:8080"
         typo.locality = Some(Locality::Local);
         let ps = merge(&config_with(vec![typo]), &local_default("main"), &[]);
         let p = find(&ps, "m");
-        assert_eq!(p.locality, Locality::Local);
+        assert_eq!(p.locality, Locality::Cloud);
         assert_eq!(p.availability, Availability::Unavailable);
+    }
+
+    #[test]
+    fn a_roster_locality_can_only_move_a_model_towards_cloud() {
+        use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+        use crate::select::{Policy, select};
+        let mut config: RoutingConfig = toml::from_str(
+            r#"
+[endpoints.claude]
+kind = "anthropic"
+
+[endpoints.groq]
+kind = "openai_compat"
+base_url = "https://api.groq.com/openai/v1"
+"#,
+        )
+        .unwrap();
+        let on = |id: &str, endpoint: Option<&str>, locality| {
+            let mut e = entry(id);
+            e.endpoint = endpoint.map(Into::into);
+            e.locality = Some(locality);
+            e
+        };
+        config.models = vec![
+            on("claude-sonnet", Some("claude"), Locality::Local),
+            on("llama-3.3-70b", Some("groq"), Locality::Local),
+            on("cloudy", None, Locality::Cloud),
+        ];
+        let reports = [reached("claude", vec![]), reached("groq", vec![])];
+        let ps = merge(&config, &local_default("main"), &reports);
+        assert_eq!(find(&ps, "claude-sonnet").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "cloudy").locality, Locality::Cloud);
+        let req = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .build();
+        assert!(select(&req, &ps, &Policy::default()).is_err());
+
+        // A cloud default endpoint's models stay cloud too.
+        let default = DefaultEndpoint {
+            name: ep("main"),
+            kind: EndpointKind::Anthropic,
+        };
+        let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
+        let ps = merge(&config, &default, &[]);
+        assert_eq!(find(&ps, "claude-haiku").locality, Locality::Cloud);
     }
 
     #[test]

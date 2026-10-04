@@ -277,12 +277,15 @@ summarize = { tier = "small" }
   to `EndpointConfig::effective_locality()` (cloud kinds are `Cloud`;
   other kinds follow their `base_url` host — local addresses only are
   `Local` — unless the endpoint sets `locality`); **any other name fails
-  closed** — `Cloud` and `Unavailable`, never selected. *(Amended
-  2026-10-04: originally the kind alone decided.)*
+  closed** — `Cloud` and `Unavailable`, never selected. A roster
+  `locality` only moves a model towards `Cloud` (never local on a cloud
+  endpoint), and never changes availability. *(Amended 2026-10-04:
+  originally the kind alone decided, and a roster `locality` overrode in
+  either direction.)*
 - `RoutingConfig::validate(&DefaultEndpoint) -> Vec<ConfigIssue>` (pure,
-  deterministic order) reports `UnknownEndpoint`, `DuplicateModel`, and
-  `MissingBaseUrl` (a local kind with no `base_url`) so products can warn
-  at startup.
+  deterministic order) reports `UnknownEndpoint`, `DuplicateModel`,
+  `MissingBaseUrl` (a local kind with no `base_url`), `NonLocalAddress`
+  and `LocalOverrideIgnored` so products can warn at startup.
 
 ### Classifier helpers
 
