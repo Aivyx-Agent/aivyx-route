@@ -46,12 +46,31 @@ pub const SHOW_CONCURRENCY: usize = 8;
 /// before it is abandoned outright.
 const DEADLINE_GRACE: Duration = Duration::from_millis(250);
 
+/// The largest discovery or residency response body read; anything
+/// larger is refused.
+pub const MAX_BODY_BYTES: u64 = 8 << 20;
+
+/// A client for discovery and residency that never follows redirects.
+/// [`discover`] and [`residency::collect`] refuse a redirected response
+/// with any client, but a client that follows one has already sent the
+/// second request.
+pub fn client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 /// Why one discovery request failed.
 #[derive(Debug)]
 pub(crate) enum FetchError {
     Http(reqwest::Error),
     /// The overall discovery deadline passed.
     TimedOut,
+    /// The server answered with (or the client followed) a redirect.
+    Redirected,
+    /// The body exceeded [`MAX_BODY_BYTES`].
+    TooLarge,
+    Json(serde_json::Error),
 }
 
 impl fmt::Display for FetchError {
@@ -59,6 +78,11 @@ impl fmt::Display for FetchError {
         match self {
             FetchError::Http(e) => e.fmt(f),
             FetchError::TimedOut => f.write_str("timed out: the discovery deadline passed"),
+            FetchError::Redirected => {
+                f.write_str("the server answered with a redirect, which is not followed")
+            }
+            FetchError::TooLarge => write!(f, "response too large (over {MAX_BODY_BYTES} bytes)"),
+            FetchError::Json(e) => write!(f, "unexpected response: {e}"),
         }
     }
 }
@@ -70,18 +94,35 @@ impl From<reqwest::Error> for FetchError {
 }
 
 /// Send `request` and parse its JSON body, within [`REQUEST_TIMEOUT`] and
-/// before `deadline`.
+/// before `deadline`. Redirects and bodies over [`MAX_BODY_BYTES`] are
+/// refused.
 pub(crate) async fn fetch_json<T: DeserializeOwned>(
     request: reqwest::RequestBuilder,
     deadline: Instant,
 ) -> Result<T, FetchError> {
     let fetch = async {
-        let response = request
-            .timeout(REQUEST_TIMEOUT)
-            .send()
-            .await?
-            .error_for_status()?;
-        Ok(response.json().await?)
+        let (client, request) = request.timeout(REQUEST_TIMEOUT).build_split();
+        let request = request?;
+        let url = request.url().clone();
+        let mut response = client.execute(request).await?;
+        if response.status().is_redirection() || *response.url() != url {
+            return Err(FetchError::Redirected);
+        }
+        response = response.error_for_status()?;
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_BODY_BYTES)
+        {
+            return Err(FetchError::TooLarge);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if (body.len() + chunk.len()) as u64 > MAX_BODY_BYTES {
+                return Err(FetchError::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(FetchError::Json)
     };
     timeout_at(deadline, fetch)
         .await
@@ -436,6 +477,56 @@ mod tests {
         match r.outcome {
             DiscoveryOutcome::Unreachable(why) => assert!(why.contains("timed out"), "{why}"),
             other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    fn unreachable_reason(outcome: DiscoveryOutcome) -> String {
+        match outcome {
+            DiscoveryOutcome::Unreachable(why) => why,
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_oversized_response_is_refused() {
+        let server = MockServer::start().await;
+        let padding = "x".repeat((MAX_BODY_BYTES + 1) as usize);
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(json(&format!(r#"{{"data":[{{"id":"{padding}"}}]}}"#)))
+            .mount(&server)
+            .await;
+        let r = discover(
+            &EndpointRef::new("big"),
+            &cfg(EndpointKind::OpenaiCompat, Some(&server.uri())),
+            &reqwest::Client::new(),
+        )
+        .await;
+        let why = unreachable_reason(r.outcome);
+        assert!(why.contains("too large"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/elsewhere"))
+            .respond_with(json(include_str!(
+                "../../tests/fixtures/openai_models.json"
+            )))
+            .mount(&server)
+            .await;
+        let config = cfg(EndpointKind::OpenaiCompat, Some(&server.uri()));
+        // A consumer's own (redirect-following) client, and ours.
+        for client in [reqwest::Client::new(), client().unwrap()] {
+            let r = discover(&EndpointRef::new("moved"), &config, &client).await;
+            let why = unreachable_reason(r.outcome);
+            assert!(why.contains("redirect"), "{why}");
         }
     }
 

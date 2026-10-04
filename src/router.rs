@@ -186,7 +186,8 @@ impl Router {
         self.state.lock().unwrap().last.get(session).cloned()
     }
 
-    /// Pins `session`'s main thread (sticky task kinds) to `key`.
+    /// Pins `session`'s main thread (sticky task kinds) to `key`. A pin
+    /// to a cloud model is ignored (but kept) while cloud routing is off.
     /// Any sticky model is dropped: it's unused while pinned, and would
     /// otherwise resurface if the pin were later evicted by the session cap.
     pub fn pin(&self, session: &str, key: ModelKey) {
@@ -244,37 +245,23 @@ impl Router {
         let mut state = self.state.lock().unwrap();
         state.cooling.retain(|_, until| *until > now);
 
+        // A pin to a cloud model while cloud routing is off is ignored (but
+        // kept): selection runs as if unpinned, and the reason says so.
+        let mut ignored_pin = None;
         if let Some(session) = &sticky_session
             && let Some(pin) = state.pins.get(session).cloned()
         {
             // A pin in use stays recent, so the session cap evicts idle
             // pins first.
             state.pins.insert(session.clone(), pin.clone());
-            // Pins win, but a mismatch is flagged rather than hidden.
-            let mut reason = format!("pinned to `{pin}`");
-            match find(&state.profiles, &pin) {
-                Some(profile) => {
-                    let unmet: Vec<String> = unmet_needs(&req, profile)
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect();
-                    if !unmet.is_empty() {
-                        reason.push_str(&format!("; warning: it may lack {}", unmet.join(", ")));
-                    }
-                    if profile.locality == Locality::Cloud && !self.allow_cloud {
-                        reason.push_str("; warning: it's a cloud model and cloud routing is off");
-                    }
-                }
-                None => reason.push_str("; warning: it isn't among the current candidates"),
+            let profile = find(&state.profiles, &pin);
+            if profile.is_some_and(|p| p.locality == Locality::Cloud) && !self.allow_cloud {
+                ignored_pin = Some(format!(
+                    "ignored pin to `{pin}`: it's a cloud model and cloud routing is off; "
+                ));
+            } else {
+                return Ok(self.pinned_plan(query, &req, pin, profile, sticky_session));
             }
-            return Ok(RoutePlan {
-                chain: vec![pin],
-                reason,
-                task: query.task.clone(),
-                session: query.session.clone(),
-                sticky_session,
-                may_stick: false,
-            });
         }
 
         let any_cooling = state
@@ -310,7 +297,8 @@ impl Router {
         };
         let mut chain = vec![decision.model.key()];
         chain.extend(decision.fallbacks.iter().map(ModelProfile::key));
-        let mut reason = decision.to_string();
+        let mut reason = ignored_pin.unwrap_or_default();
+        reason.push_str(&decision.to_string());
         if retrying_cooled {
             reason.push_str("; retrying a model still cooling down after a failure");
         }
@@ -322,6 +310,39 @@ impl Router {
             sticky_session,
             may_stick: !any_cooling,
         })
+    }
+
+    /// The plan for a pin that applies. Pins win, but a mismatch is
+    /// flagged rather than hidden.
+    fn pinned_plan(
+        &self,
+        query: &RouteQuery,
+        req: &Requirements,
+        pin: ModelKey,
+        profile: Option<&ModelProfile>,
+        sticky_session: Option<String>,
+    ) -> RoutePlan {
+        let mut reason = format!("pinned to `{pin}`");
+        match profile {
+            Some(profile) => {
+                let unmet: Vec<String> = unmet_needs(req, profile)
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                if !unmet.is_empty() {
+                    reason.push_str(&format!("; warning: it may lack {}", unmet.join(", ")));
+                }
+            }
+            None => reason.push_str("; warning: it isn't among the current candidates"),
+        }
+        RoutePlan {
+            chain: vec![pin],
+            reason,
+            task: query.task.clone(),
+            session: query.session.clone(),
+            sticky_session,
+            may_stick: false,
+        }
     }
 
     /// `served` answered the call planned by `plan`, after `failures`
@@ -630,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pin_to_a_cloud_model_is_flagged_while_cloud_routing_is_off() {
+    fn a_pin_to_a_cloud_model_falls_back_to_selection_while_cloud_routing_is_off() {
         let mut profiles = three();
         let mut cloud = p("anthropic", "claude", Tier::Large, &[]);
         cloud.locality = Locality::Cloud;
@@ -640,17 +661,27 @@ mod tests {
         let plan = r
             .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
             .unwrap();
-        assert_eq!(plan.chain, vec![key("anthropic", "claude")]);
         assert!(
-            plan.reason.contains("warning: it's a cloud model"),
+            !plan.chain.contains(&key("anthropic", "claude")),
+            "{:?}",
+            plan.chain
+        );
+        assert_eq!(plan.chain[0], key("gpu", "big"));
+        assert!(
+            plan.reason.starts_with(
+                "ignored pin to `claude@anthropic`: it's a cloud model and cloud routing is off; chose"
+            ),
             "{}",
             plan.reason
         );
+        // The pin is kept for when cloud routing is on.
+        assert_eq!(r.pinned("s"), Some(key("anthropic", "claude")));
         let allowed = router(profiles).with_allow_cloud(true);
         allowed.pin("s", key("anthropic", "claude"));
         let plan = allowed
             .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
             .unwrap();
+        assert_eq!(plan.chain, vec![key("anthropic", "claude")]);
         assert!(!plan.reason.contains("warning"), "{}", plan.reason);
     }
 

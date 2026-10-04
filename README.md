@@ -132,8 +132,11 @@ hadn't listed its models is reported unreachable ("timed out"). Tiers and
 strengths always come from the roster — no backend reports quality.
 Ollama's discovered context window is the model's *trained* length, not
 the `num_ctx` it is served with: set the roster `context_window` to your
-serving value (Part 4 will read it from `/api/ps`). The discovery module
-re-exports `reqwest`, so a consumer on another major builds its client as
+serving value (Part 4 will read it from `/api/ps`). Discovery and
+residency read at most 8 MiB per response (`MAX_BODY_BYTES`) and refuse a
+redirect; `aivyx_route::discovery::client()` builds a client that doesn't
+follow one in the first place. The discovery module re-exports `reqwest`,
+so a consumer on another major builds its client as
 `aivyx_route::discovery::reqwest::Client::new()`.
 
 ## Use
@@ -187,7 +190,11 @@ Semantics (operator-approved in model-routing Part 2):
   fail a request;
 - a fallback, or a choice made while any model was cooling, never becomes a
   session's sticky model;
-- a pin never writes the sticky map, and `unpin` clears it too.
+- a pin never writes the sticky map, and `unpin` clears it too;
+- a pin wins over ranking (a model that may lack a need, or is no longer a
+  candidate, is still used, with a warning in the reason) — except a pin
+  to a cloud model while cloud routing is off: selection then runs as if
+  unpinned, the reason starts "ignored pin to …", and the pin is kept.
 
 ## Residency (Part 4)
 

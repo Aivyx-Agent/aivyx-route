@@ -5,7 +5,11 @@
 
 use serde::Deserialize;
 
-use super::REQUEST_TIMEOUT;
+use std::collections::HashSet;
+
+use tokio::time::Instant;
+
+use super::{FetchError, REQUEST_TIMEOUT, fetch_json};
 use crate::config::{EndpointConfig, EndpointKind, RoutingConfig};
 use crate::profile::{EndpointRef, ModelKey};
 use crate::residency::{ModelResidency, ResidencySnapshot, SlotPressure, Vram};
@@ -114,7 +118,7 @@ pub async fn collect(
                 ModelResidency::Loaded { vram_bytes } => *vram_bytes,
                 ModelResidency::NotLoaded { .. } => None,
             })
-            .sum();
+            .fold(0u64, u64::saturating_add);
         snap.vram = Some(Vram {
             total_bytes,
             used_bytes,
@@ -123,18 +127,13 @@ pub async fn collect(
     snap
 }
 
+/// One residency request: bounded by [`REQUEST_TIMEOUT`], refusing
+/// redirects and oversized bodies like discovery does.
 async fn get_json<T: serde::de::DeserializeOwned>(
     url: String,
     client: &reqwest::Client,
-) -> Result<T, reqwest::Error> {
-    client
-        .get(url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
+) -> Result<T, FetchError> {
+    fetch_json(client.get(url), Instant::now() + REQUEST_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
@@ -156,9 +155,13 @@ struct OllamaModel {
 async fn ollama(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<(String, ModelResidency)>, reqwest::Error> {
+) -> Result<Vec<(String, ModelResidency)>, FetchError> {
     let running: OllamaList = get_json(format!("{base}/api/ps"), client).await?;
     let tags: OllamaList = get_json(format!("{base}/api/tags"), client).await?;
+    Ok(ollama_residency(running, tags))
+}
+
+fn ollama_residency(running: OllamaList, tags: OllamaList) -> Vec<(String, ModelResidency)> {
     let mut out: Vec<(String, ModelResidency)> = running
         .models
         .into_iter()
@@ -169,15 +172,16 @@ async fn ollama(
             (m.name, residency)
         })
         .collect();
+    let mut seen: HashSet<String> = out.iter().map(|(id, _)| id.clone()).collect();
     for model in tags.models {
-        if !out.iter().any(|(id, _)| *id == model.name) {
+        if seen.insert(model.name.clone()) {
             let residency = ModelResidency::NotLoaded {
                 size_bytes: model.size,
             };
             out.push((model.name, residency));
         }
     }
-    Ok(with_untagged_aliases(out))
+    with_untagged_aliases(out)
 }
 
 /// Ollama reports a tagless model as `name:latest`, but operators often
@@ -188,11 +192,12 @@ async fn ollama(
 fn with_untagged_aliases(
     mut models: Vec<(String, ModelResidency)>,
 ) -> Vec<(String, ModelResidency)> {
+    let ids: HashSet<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
     let aliases: Vec<(String, ModelResidency)> = models
         .iter()
         .filter_map(|(id, residency)| {
             let untagged = id.strip_suffix(":latest")?;
-            if models.iter().any(|(other, _)| other == untagged) {
+            if ids.contains(untagged) {
                 return None;
             }
             let residency = match residency {
@@ -229,7 +234,7 @@ struct RouterStatus {
 async fn llama_router(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<(String, ModelResidency)>, reqwest::Error> {
+) -> Result<Vec<(String, ModelResidency)>, FetchError> {
     let models: RouterModels = get_json(format!("{base}/models"), client).await?;
     Ok(models
         .data
@@ -286,7 +291,7 @@ struct LemonadeModel {
 async fn lemonade(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<(String, ModelResidency)>, reqwest::Error> {
+) -> Result<Vec<(String, ModelResidency)>, FetchError> {
     let health: LemonadeHealth = get_json(super::lemonade::api_url(base, "health"), client).await?;
     let mut out: Vec<(String, ModelResidency)> = health
         .all_models_loaded
@@ -297,8 +302,9 @@ async fn lemonade(
     if let Ok(models) =
         get_json::<LemonadeModels>(super::lemonade::api_url(base, "models"), client).await
     {
+        let mut seen: HashSet<String> = out.iter().map(|(id, _)| id.clone()).collect();
         for model in models.data {
-            if model.downloaded && !out.iter().any(|(id, _)| *id == model.id) {
+            if model.downloaded && seen.insert(model.id.clone()) {
                 let size_bytes = model.size.map(|gb| (gb * 1e9).round() as u64);
                 out.push((model.id, ModelResidency::NotLoaded { size_bytes }));
             }
@@ -334,10 +340,7 @@ struct BrokerSlots {
     total: u32,
 }
 
-async fn broker_report(
-    base: &str,
-    client: &reqwest::Client,
-) -> Result<BrokerReport, reqwest::Error> {
+async fn broker_report(base: &str, client: &reqwest::Client) -> Result<BrokerReport, FetchError> {
     get_json(
         format!("{}/v1/aivyx/residency", base.trim_end_matches('/')),
         client,
@@ -419,6 +422,96 @@ mod tests {
             }
         );
         assert_eq!(snap.vram, None);
+    }
+
+    #[test]
+    fn ollama_dedup_scales_to_a_huge_tag_list() {
+        let list = |n: usize| OllamaList {
+            models: (0..n)
+                .map(|i| OllamaModel {
+                    name: format!("model-{i}:latest"),
+                    size: Some(1),
+                    size_vram: Some(1),
+                })
+                .collect(),
+        };
+        let started = std::time::Instant::now();
+        let out = ollama_residency(list(20_000), list(40_000));
+        // 40k ids plus 40k untagged aliases.
+        assert_eq!(out.len(), 80_000);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn huge_vram_figures_saturate_instead_of_overflowing() {
+        let server = serve(
+            "/api/ps",
+            r#"{"models":[{"name":"a:1b","size_vram":18446744073709551615},{"name":"b:1b","size_vram":18446744073709551615}]}"#,
+        )
+        .await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(json_response(r#"{"models":[]}"#))
+            .mount(&server)
+            .await;
+        let snap = collect(
+            &[(
+                EndpointRef::new("ollama"),
+                endpoint(EndpointKind::Ollama, &server.uri()),
+            )],
+            None,
+            Some(24 << 30),
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert_eq!(snap.vram.map(|v| v.used_bytes), Some(u64::MAX));
+        assert_eq!(snap.available_vram(), Some(24 << 30));
+    }
+
+    #[tokio::test]
+    async fn oversized_and_redirected_responses_contribute_nothing() {
+        let big = format!(
+            r#"{{"models":[{{"name":"pad","size":1,"digest":"{}"}}]}}"#,
+            "x".repeat(9 << 20)
+        );
+        let oversized = serve("/api/ps", r#"{"models":[]}"#).await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(json_response(&big))
+            .mount(&oversized)
+            .await;
+        let redirected = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/elsewhere"))
+            .mount(&redirected)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/elsewhere"))
+            .respond_with(json_response(ROUTER))
+            .mount(&redirected)
+            .await;
+        let snap = collect(
+            &[
+                (
+                    EndpointRef::new("ollama"),
+                    endpoint(EndpointKind::Ollama, &oversized.uri()),
+                ),
+                (
+                    EndpointRef::new("router"),
+                    endpoint(EndpointKind::LlamaRouter, &redirected.uri()),
+                ),
+            ],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert!(snap.models.is_empty(), "{:?}", snap.models);
     }
 
     /// Ollama reports a tagless model as `name:latest`, while operators

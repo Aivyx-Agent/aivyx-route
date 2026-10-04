@@ -68,7 +68,7 @@ impl ResidencySnapshot {
                 ModelResidency::Loaded { vram_bytes } => *vram_bytes,
                 ModelResidency::NotLoaded { .. } => None,
             })
-            .sum();
+            .fold(0, u64::saturating_add);
         let held_elsewhere = vram.used_bytes.saturating_sub(evictable);
         Some(vram.total_bytes.saturating_sub(held_elsewhere))
     }
@@ -136,6 +136,15 @@ mod tests {
     fn with_resident_local(mut s: ResidencySnapshot) -> ResidencySnapshot {
         s.resident_endpoints.insert(EndpointRef::new("local"));
         s
+    }
+
+    #[test]
+    fn available_vram_saturates_on_huge_loaded_figures() {
+        let huge = ModelResidency::Loaded {
+            vram_bytes: Some(u64::MAX),
+        };
+        let s = snapshot(&[("a", huge), ("b", huge)], Some((24 * G, 20 * G)));
+        assert_eq!(s.available_vram(), Some(24 * G));
     }
 
     #[test]
