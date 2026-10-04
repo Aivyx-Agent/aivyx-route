@@ -42,12 +42,14 @@ pub(crate) fn url_host(url: &str) -> Option<String> {
 
 fn parse_host(url: &str) -> Option<Host<String>> {
     let url = url.trim();
-    let parsed = if url.contains("://") {
-        Url::parse(url)
-    } else {
-        Url::parse(&format!("http://{url}"))
-    }
-    .ok()?;
+    // An http(s) URL is classified exactly as the client will parse it,
+    // whatever its slash spelling (`http:/host`, `http:\\host`, …); only a
+    // string with no scheme of its own (`myhost:8080`) gets `http://`.
+    let parsed = match Url::parse(url) {
+        Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+        _ if url.contains("://") || has_http_scheme(url) => return None,
+        _ => Url::parse(&format!("http://{url}")).ok()?,
+    };
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
@@ -56,6 +58,12 @@ fn parse_host(url: &str) -> Option<Host<String>> {
         Host::Domain(domain) if domain.is_empty() => None,
         _ => Some(host),
     }
+}
+
+/// Whether `url` starts with an `http:`/`https:` scheme, in any case.
+fn has_http_scheme(url: &str) -> bool {
+    let lower = url.get(..6).unwrap_or(url).to_ascii_lowercase();
+    lower.starts_with("http:") || lower.starts_with("https:")
 }
 
 fn locality_if(local: bool) -> Locality {
@@ -152,6 +160,12 @@ mod tests {
         for url in [
             "https://api.groq.com/openai/v1",
             "https://openrouter.ai/api/v1",
+            "http:/api.groq.com",
+            "http:/\\api.groq.com",
+            "http:\\\\api.groq.com",
+            "HTTP:/api.groq.com",
+            "https:/8.8.8.8/v1",
+            "http:/lan@api.groq.com",
             "http://8.8.8.8",
             "http://172.32.0.1",
             "http://100.128.0.1",
