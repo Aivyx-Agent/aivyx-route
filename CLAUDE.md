@@ -40,7 +40,7 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/locality.rs` — `url_locality()`: Local vs Cloud from an endpoint URL's host as the `url` crate (WHATWG, like reqwest) parses it; no DNS; `EndpointConfig::effective_locality()` builds on it.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.
 - `src/classifier.rs` — optional small-model classifier prompt/parse.
-- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O.
+- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O. Concurrent, deadline-bounded, 8 MiB body cap, no redirects; never contacts an endpoint whose `effective_locality()` is Cloud.
 
 Models are identified by `ModelKey` (endpoint, id), never by id alone.
 
