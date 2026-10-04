@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::locality::{url_host, url_locality};
 use crate::profile::{CapabilitySet, EndpointRef, Locality, Strength, Tier};
 use crate::requirements::TaskOverrides;
 
@@ -59,6 +60,17 @@ pub enum ConfigIssue {
     DuplicateModel { endpoint: String, model: String },
     /// A local endpoint with no `base_url` and no default for its kind.
     MissingBaseUrl { endpoint: String },
+    /// A non-cloud-kind endpoint whose `base_url` host is not a local
+    /// address, with no explicit `locality`: its models count as cloud.
+    NonLocalAddress { endpoint: String, host: String },
+    /// A `locality = "local"` override on something cloud, which is
+    /// ignored: on the endpoint itself (`model` is `None`), or on a roster
+    /// entry for a model on a cloud endpoint.
+    LocalOverrideIgnored {
+        endpoint: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
 }
 
 impl fmt::Display for ConfigIssue {
@@ -78,6 +90,27 @@ impl fmt::Display for ConfigIssue {
                 f,
                 "endpoint `{endpoint}` has no base_url and its kind has no default"
             ),
+            ConfigIssue::NonLocalAddress { endpoint, host } => write!(
+                f,
+                "endpoint `{endpoint}` points at `{host}`, which is not a local address, so its \
+                 models count as cloud; if it is on your own network, set `locality = \"local\"` \
+                 on the endpoint"
+            ),
+            ConfigIssue::LocalOverrideIgnored {
+                endpoint,
+                model: None,
+            } => write!(
+                f,
+                "endpoint `{endpoint}` is a cloud endpoint; its `locality = \"local\"` is ignored"
+            ),
+            ConfigIssue::LocalOverrideIgnored {
+                endpoint,
+                model: Some(model),
+            } => write!(
+                f,
+                "model `{model}` is on cloud endpoint `{endpoint}`; its `locality = \"local\"` is \
+                 ignored"
+            ),
         }
     }
 }
@@ -86,14 +119,32 @@ impl RoutingConfig {
     /// Report configuration mistakes. Pure; endpoint issues come first (in
     /// name order), then roster issues (in roster order).
     pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
-        let mut issues: Vec<ConfigIssue> = self
-            .endpoints
-            .iter()
-            .filter(|(_, c)| c.kind.locality() == Locality::Local && c.base_url().is_none())
-            .map(|(name, _)| ConfigIssue::MissingBaseUrl {
-                endpoint: name.clone(),
-            })
-            .collect();
+        let mut issues = Vec::new();
+        for (name, c) in &self.endpoints {
+            let cloud_kind = c.kind.locality() == Locality::Cloud;
+            match c.base_url() {
+                None if !cloud_kind => issues.push(ConfigIssue::MissingBaseUrl {
+                    endpoint: name.clone(),
+                }),
+                Some(url)
+                    if !cloud_kind
+                        && c.locality.is_none()
+                        && url_locality(url) == Locality::Cloud =>
+                {
+                    issues.push(ConfigIssue::NonLocalAddress {
+                        endpoint: name.clone(),
+                        host: url_host(url).unwrap_or_default(),
+                    });
+                }
+                _ => {}
+            }
+            if cloud_kind && c.locality == Some(Locality::Local) {
+                issues.push(ConfigIssue::LocalOverrideIgnored {
+                    endpoint: name.clone(),
+                    model: None,
+                });
+            }
+        }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
             let endpoint = entry
@@ -133,6 +184,9 @@ pub enum EndpointKind {
 }
 
 impl EndpointKind {
+    /// The kind's own locality: `Cloud` for hosted APIs. A non-cloud kind
+    /// can still point at a hosted server, so decisions about where
+    /// requests go use [`EndpointConfig::effective_locality`] instead.
     pub fn locality(self) -> Locality {
         match self {
             EndpointKind::Anthropic | EndpointKind::Openai => Locality::Cloud,
@@ -159,12 +213,32 @@ pub struct EndpointConfig {
     pub kind: EndpointKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Operator override of the locality the address implies: `local`
+    /// marks a non-cloud kind local even when its host looks public (a LAN
+    /// box with a public DNS name); `cloud` marks it cloud. Never makes a
+    /// cloud kind local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locality: Option<Locality>,
 }
 
 impl EndpointConfig {
     /// The configured URL, else the kind's default.
     pub fn base_url(&self) -> Option<&str> {
         self.base_url.as_deref().or(self.kind.default_base_url())
+    }
+
+    /// Whether requests to this endpoint leave the machine's network.
+    /// Cloud kinds are always `Cloud`. Otherwise an explicit `locality`
+    /// wins, else the [`base_url`](Self::base_url) host decides
+    /// ([`url_locality`]); no URL at all is `Cloud` (fail closed).
+    pub fn effective_locality(&self) -> Locality {
+        if self.kind.locality() == Locality::Cloud {
+            return Locality::Cloud;
+        }
+        match self.locality {
+            Some(locality) => locality,
+            None => self.base_url().map_or(Locality::Cloud, url_locality),
+        }
     }
 }
 
@@ -398,6 +472,119 @@ endpoint = "gpu"
                 "model `a` names endpoint `olama`, which is not configured; it will never be selected",
                 "model `b` on endpoint `main` is listed more than once",
             ]
+        );
+    }
+
+    fn endpoint(toml_src: &str) -> EndpointConfig {
+        toml::from_str(toml_src).unwrap()
+    }
+
+    #[test]
+    fn a_hosted_openai_compatible_endpoint_is_cloud() {
+        let groq =
+            endpoint("kind = \"openai_compat\"\nbase_url = \"https://api.groq.com/openai/v1\"");
+        assert_eq!(groq.effective_locality(), Locality::Cloud);
+        // A local kind's own locality is not the endpoint's.
+        assert_eq!(groq.kind.locality(), Locality::Local);
+    }
+
+    #[test]
+    fn local_addresses_keep_non_cloud_kinds_local() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://10.0.0.5:11434",
+            "http://192.168.1.20:8080/v1",
+            "http://100.100.1.2:11434",
+            "http://[::1]:8080",
+            "http://gpu.lan:8080",
+            "http://myhost:8080",
+        ] {
+            for kind in ["ollama", "llama_router", "openai_compat", "lemonade"] {
+                let ep = endpoint(&format!("kind = \"{kind}\"\nbase_url = \"{url}\""));
+                assert_eq!(ep.effective_locality(), Locality::Local, "{kind} {url}");
+            }
+        }
+        // Kind defaults are loopback.
+        assert_eq!(
+            endpoint("kind = \"ollama\"").effective_locality(),
+            Locality::Local
+        );
+        assert_eq!(
+            endpoint("kind = \"lemonade\"").effective_locality(),
+            Locality::Local
+        );
+    }
+
+    #[test]
+    fn an_explicit_endpoint_locality_marks_a_public_name_local_but_never_a_cloud_kind() {
+        let lan = endpoint(
+            "kind = \"ollama\"\nbase_url = \"http://gpu.example.com:11434\"\nlocality = \"local\"",
+        );
+        assert_eq!(lan.effective_locality(), Locality::Local);
+        let forced = endpoint(
+            "kind = \"ollama\"\nbase_url = \"http://localhost:11434\"\nlocality = \"cloud\"",
+        );
+        assert_eq!(forced.effective_locality(), Locality::Cloud);
+        for kind in ["anthropic", "openai"] {
+            let ep = endpoint(&format!(
+                "kind = \"{kind}\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\""
+            ));
+            assert_eq!(ep.effective_locality(), Locality::Cloud, "{kind}");
+        }
+    }
+
+    #[test]
+    fn a_non_cloud_kind_with_no_address_fails_closed() {
+        assert_eq!(
+            endpoint("kind = \"openai_compat\"").effective_locality(),
+            Locality::Cloud
+        );
+    }
+
+    #[test]
+    fn validate_explains_locality_surprises() {
+        let c = toml::from_str::<Doc>(
+            r#"
+[routing.endpoints.claude]
+kind = "anthropic"
+locality = "local"
+
+[routing.endpoints.groq]
+kind = "openai_compat"
+base_url = "https://api.groq.com/openai/v1"
+
+[routing.endpoints.lan]
+kind = "ollama"
+base_url = "http://gpu.example.com:11434"
+locality = "local"
+
+[routing.endpoints.home]
+kind = "ollama"
+base_url = "http://192.168.1.20:11434"
+"#,
+        )
+        .unwrap()
+        .routing;
+        let issues = c.validate(&local_default());
+        assert_eq!(
+            issues,
+            vec![
+                ConfigIssue::LocalOverrideIgnored {
+                    endpoint: "claude".into(),
+                    model: None
+                },
+                ConfigIssue::NonLocalAddress {
+                    endpoint: "groq".into(),
+                    host: "api.groq.com".into()
+                },
+            ]
+        );
+        let text: Vec<String> = issues.iter().map(ToString::to_string).collect();
+        assert!(text[0].contains("cloud endpoint"), "{}", text[0]);
+        assert!(
+            text[1].contains("`api.groq.com`") && text[1].contains("locality = \"local\""),
+            "{}",
+            text[1]
         );
     }
 

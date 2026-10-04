@@ -77,11 +77,42 @@ your name for it, instead of adding a second one. Listing both spellings
 names one model (kept as `llama3.2:latest`); both entries apply to it, in
 roster order.
 
-An `endpoint` that is neither the product's default nor a
+### Local or cloud
+
+A model is *cloud* when requests to it leave your network; routing only
+picks cloud models when the product allows it. An endpoint's locality
+(`EndpointConfig::effective_locality()`) comes from its address, not just
+its kind:
+
+- `anthropic` and `openai` endpoints are always cloud.
+- Any other kind is local only when its `base_url` host is local: an IP in
+  a loopback, private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`),
+  link-local (`169.254/16`, `fe80::/10`) or CGNAT/Tailscale
+  (`100.64.0.0/10`) range, or a hostname that is `localhost`, has no dots,
+  or ends in `.local`, `.lan`, `.internal` or `.home.arpa`. Every other
+  host is cloud, so an `openai_compat` endpoint at
+  `https://api.groq.com/openai/v1` is cloud. An endpoint with no address is
+  cloud too.
+- `locality = "local"` on the endpoint marks a box on your network with a
+  public-looking DNS name local; `locality = "cloud"` forces cloud. Neither
+  makes a cloud kind local.
+
+```toml
+[routing.endpoints.gpu]
+kind = "ollama"
+base_url = "http://gpu.example.com:11434"
+locality = "local"
+```
+
+The product's default backend takes its kind's locality; the product
+chooses that kind. An `endpoint` that is neither the product's default nor a
 `[routing.endpoints]` key (a typo, say) fails closed: its models are treated
 as cloud and unavailable, so they are never selected.
-`RoutingConfig::validate(&default)` reports that, duplicate models, and
-local endpoints with no `base_url`; products warn at startup.
+
+`RoutingConfig::validate(&default)` reports unknown endpoints, duplicate
+models, local endpoints with no `base_url`, non-cloud endpoints whose
+address makes them cloud, and ignored `locality = "local"` overrides;
+products warn at startup.
 
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
 `/api/show`, llama-server router mode's `/models`, `/v1/models` on any

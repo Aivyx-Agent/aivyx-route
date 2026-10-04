@@ -274,9 +274,11 @@ summarize = { tier = "small" }
 - Endpoint locality: `merge` takes the product's `DefaultEndpoint { name,
   kind }`. The default name resolves to its kind's locality (so an
   aivyx-pa default of Anthropic is `Cloud`); a `[routing.endpoints]` key
-  to its kind's; **any other name fails closed** — `Cloud` and
-  `Unavailable`, never selected. An explicit roster `locality` still
-  overrides locality (not availability).
+  to `EndpointConfig::effective_locality()` (cloud kinds are `Cloud`;
+  other kinds follow their `base_url` host — local addresses only are
+  `Local` — unless the endpoint sets `locality`); **any other name fails
+  closed** — `Cloud` and `Unavailable`, never selected. *(Amended
+  2026-10-04: originally the kind alone decided.)*
 - `RoutingConfig::validate(&DefaultEndpoint) -> Vec<ConfigIssue>` (pure,
   deterministic order) reports `UnknownEndpoint`, `DuplicateModel`, and
   `MissingBaseUrl` (a local kind with no `base_url`) so products can warn

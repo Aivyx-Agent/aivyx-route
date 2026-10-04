@@ -377,6 +377,7 @@ mod tests {
         EndpointConfig {
             kind,
             base_url: Some(base.to_string()),
+            locality: None,
         }
     }
 
@@ -871,6 +872,7 @@ mod tests {
                     EndpointConfig {
                         kind: EndpointKind::Anthropic,
                         base_url: None,
+                        locality: None,
                     },
                 ),
             ],

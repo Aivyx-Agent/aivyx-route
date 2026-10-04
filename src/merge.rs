@@ -58,10 +58,19 @@ pub fn merge(
             config.endpoints.get(ep.as_str()).map(|c| c.kind)
         }
     };
-    // Unknown endpoints fail closed: a typo must never make a cloud model
-    // look local.
-    let endpoint_locality =
-        |ep: &EndpointRef| endpoint_kind(ep).map_or(Locality::Cloud, |k| k.locality());
+    // Configured endpoints: their address decides (see
+    // `EndpointConfig::effective_locality`). Unknown endpoints fail closed:
+    // a typo must never make a cloud model look local.
+    let endpoint_locality = |ep: &EndpointRef| {
+        if *ep == default.name {
+            default.kind.locality()
+        } else {
+            config
+                .endpoints
+                .get(ep.as_str())
+                .map_or(Locality::Cloud, |c| c.effective_locality())
+        }
+    };
     let outcome_of = |ep: &EndpointRef| {
         reports
             .iter()
@@ -504,6 +513,7 @@ mod tests {
             EndpointConfig {
                 kind: EndpointKind::Anthropic,
                 base_url: None,
+                locality: None,
             },
         );
         let mut claude = entry("claude-sonnet-5");
@@ -515,6 +525,54 @@ mod tests {
         assert_eq!(find(&ps, "claude-sonnet-5").locality, Locality::Cloud);
         assert_eq!(find(&ps, "forced").locality, Locality::Cloud);
         assert_eq!(find(&ps, "local-one").locality, Locality::Local);
+    }
+
+    #[test]
+    fn locality_follows_the_endpoint_address_not_just_its_kind() {
+        use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+        use crate::select::{Policy, select};
+        let config: RoutingConfig = toml::from_str(
+            r#"
+[endpoints.groq]
+kind = "openai_compat"
+base_url = "https://api.groq.com/openai/v1"
+
+[endpoints.lan]
+kind = "ollama"
+base_url = "http://gpu.example.com:11434"
+locality = "local"
+
+[endpoints.home]
+kind = "llama_router"
+base_url = "http://192.168.1.20:8080"
+"#,
+        )
+        .unwrap();
+        let reports = [
+            reached("groq", vec![found("llama-3.3-70b", &[], None)]),
+            reached("lan", vec![found("qwen3:8b", &[], None)]),
+            reached("home", vec![found("gemma", &[], None)]),
+        ];
+        let mut roster_only = entry("kimi");
+        roster_only.endpoint = Some("groq".into());
+        let config = RoutingConfig {
+            models: vec![roster_only],
+            ..config
+        };
+        let ps = merge(&config, &local_default("main"), &reports);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "kimi").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "qwen3:8b").locality, Locality::Local);
+        assert_eq!(find(&ps, "gemma").locality, Locality::Local);
+
+        let groq_only = merge(&config, &local_default("main"), &reports[..1]);
+        let req = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .build();
+        assert!(
+            select(&req, &groq_only, &Policy::default()).is_err(),
+            "cloud off must never pick a hosted endpoint"
+        );
     }
 
     #[test]
