@@ -11,7 +11,7 @@ use tokio::time::Instant;
 
 use super::{FetchError, REQUEST_TIMEOUT, fetch_json};
 use crate::config::{EndpointConfig, EndpointKind, RoutingConfig};
-use crate::profile::{EndpointRef, ModelKey};
+use crate::profile::{EndpointRef, Locality, ModelKey};
 use crate::residency::{ModelResidency, ResidencySnapshot, SlotPressure, Vram};
 
 /// A product's `aivyx-broker`. Brokers front the product's *default*
@@ -33,8 +33,9 @@ pub fn endpoints_of(config: &RoutingConfig) -> Vec<(EndpointRef, EndpointConfig)
         .collect()
 }
 
-/// One residency snapshot from every source: Ollama and llama.cpp-router
-/// endpoints, then the broker (whose VRAM figure wins), then `vram_bytes`
+/// One residency snapshot from every source: Ollama, llama.cpp-router and
+/// Lemonade endpoints (never one whose effective locality is `Cloud`),
+/// then the broker (whose VRAM figure wins), then `vram_bytes`
 /// as the total when nothing reported VRAM.
 pub async fn collect(
     endpoints: &[(EndpointRef, EndpointConfig)],
@@ -44,6 +45,10 @@ pub async fn collect(
 ) -> ResidencySnapshot {
     let mut snap = ResidencySnapshot::default();
     for (name, endpoint) in endpoints {
+        // Never poll anything the crate calls cloud.
+        if endpoint.effective_locality() == Locality::Cloud {
+            continue;
+        }
         let Some(base) = endpoint.base_url() else {
             continue;
         };
@@ -444,6 +449,33 @@ mod tests {
             "took {:?}",
             started.elapsed()
         );
+    }
+
+    #[tokio::test]
+    async fn endpoints_whose_address_is_cloud_are_never_polled() {
+        let server = serve("/api/ps", PS).await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(json_response(TAGS))
+            .mount(&server)
+            .await;
+        let mut forced = endpoint(EndpointKind::Ollama, &server.uri());
+        forced.locality = Some(crate::profile::Locality::Cloud);
+        let snap = collect(
+            &[
+                (EndpointRef::new("forced"), forced),
+                (
+                    EndpointRef::new("hosted"),
+                    endpoint(EndpointKind::Lemonade, "http://203.0.113.7:9/api"),
+                ),
+            ],
+            None,
+            None,
+            &reqwest::Client::new(),
+        )
+        .await;
+        assert!(snap.models.is_empty(), "{:?}", snap.models);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

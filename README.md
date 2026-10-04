@@ -127,7 +127,9 @@ OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded
 models only; its `labels` map to capabilities — `reasoning` marks a
 thinking model, but an unlabelled one may still think, so thinking is
 otherwise unknown, as is audio; the base is `.../api`, and a trailing
-`/v1` is tolerated). Cloud endpoints are never probed. Endpoints are
+`/v1` is tolerated). Cloud endpoints — by kind, by address, or marked
+`locality = "cloud"` (see *Local or cloud*) — are never contacted:
+discovery reports them `NotProbed` and residency skips them. Endpoints are
 probed concurrently, Ollama's `/api/show` calls 8 at a time, and the whole
 run stops at a deadline (15 s; `discover_all_within` / `discover_within`
 take another): whatever was found by then is returned, a model whose

@@ -9,6 +9,10 @@
 //! At the deadline whatever was found is returned: a model whose details
 //! didn't arrive keeps every capability unknown, and an endpoint that
 //! hadn't listed its models is `Unreachable` ("timed out").
+//!
+//! Endpoints whose [`EndpointConfig::effective_locality`] is `Cloud` —
+//! cloud kinds, hosted addresses, `locality = "cloud"` — are never
+//! contacted: they report `NotProbed`, and residency skips them.
 
 mod lemonade;
 mod llama_router;
@@ -30,7 +34,7 @@ pub use reqwest;
 
 use crate::config::{EndpointConfig, EndpointKind, RoutingConfig};
 use crate::merge::{DiscoveryOutcome, DiscoveryReport};
-use crate::profile::EndpointRef;
+use crate::profile::{EndpointRef, Locality};
 
 /// Timeout for each individual HTTP request made during discovery.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -179,6 +183,11 @@ async fn probe(
             None => DiscoveryOutcome::Unreachable(format!(
                 "no base_url configured for endpoint `{endpoint}`"
             )),
+            // Whatever its kind, an endpoint the crate calls cloud (a
+            // hosted address, or `locality = "cloud"`) is never contacted.
+            Some(_) if config.effective_locality() == Locality::Cloud => {
+                DiscoveryOutcome::NotProbed
+            }
             Some(base) => {
                 let base = base.trim_end_matches('/');
                 let result = match kind {
@@ -260,6 +269,33 @@ mod tests {
             )
             .await;
             assert_eq!(r.outcome, DiscoveryOutcome::NotProbed);
+        }
+    }
+
+    /// Anything the crate calls cloud is never contacted, whatever its kind.
+    #[tokio::test]
+    async fn endpoints_whose_address_is_cloud_are_never_probed() {
+        let server = slow_ollama(1, Duration::ZERO, Duration::ZERO).await;
+        let client = reqwest::Client::new();
+        let mut forced = cfg(EndpointKind::Ollama, Some(&server.uri()));
+        forced.locality = Some(crate::profile::Locality::Cloud);
+        let r = discover(&EndpointRef::new("forced"), &forced, &client).await;
+        assert_eq!(r.outcome, DiscoveryOutcome::NotProbed);
+        assert!(server.received_requests().await.unwrap().is_empty());
+        // A public address (TEST-NET-3) on a local kind.
+        for kind in [
+            EndpointKind::OpenaiCompat,
+            EndpointKind::Ollama,
+            EndpointKind::LlamaRouter,
+            EndpointKind::Lemonade,
+        ] {
+            let r = discover(
+                &EndpointRef::new("hosted"),
+                &cfg(kind, Some("http://203.0.113.7:9")),
+                &client,
+            )
+            .await;
+            assert_eq!(r.outcome, DiscoveryOutcome::NotProbed, "{kind:?}");
         }
     }
 
