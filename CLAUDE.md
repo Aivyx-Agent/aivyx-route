@@ -37,7 +37,7 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/router.rs` — the shared stateful layer (stickiness, pins, cooldowns) products wrap around select().
 - `src/sessions.rs` — `SessionMap`, the size-capped per-session map the Router keeps its per-conversation state in (default `MAX_SESSIONS` = 1024, least recently updated evicted).
 - `src/config.rs` — the `[routing]` TOML shape both products embed.
-- `src/locality.rs` — `url_locality()`: Local vs Cloud from an endpoint URL's host (no DNS); `EndpointConfig::effective_locality()` builds on it.
+- `src/locality.rs` — `url_locality()`: Local vs Cloud from an endpoint URL's host as the `url` crate (WHATWG, like reqwest) parses it; no DNS; `EndpointConfig::effective_locality()` builds on it.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.
 - `src/classifier.rs` — optional small-model classifier prompt/parse.
 - `src/discovery/` — HTTP clients (feature `discovery`); the only I/O.

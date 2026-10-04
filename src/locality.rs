@@ -1,52 +1,64 @@
 //! Where an endpoint's address points: on this machine or network
-//! (`Local`), or anywhere else (`Cloud`). Pure string inspection — no DNS.
+//! (`Local`), or anywhere else (`Cloud`). No DNS: the host is classified as
+//! the HTTP client will see it, after WHATWG URL parsing (percent-decoding,
+//! IDNA, numeric IPv4 forms).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+use url::{Host, Url};
 
 use crate::profile::Locality;
 
 /// The locality an endpoint URL implies, from its host alone.
 ///
-/// `Local` for an IP literal in a loopback, private (RFC 1918, ULA
-/// `fc00::/7`), link-local, CGNAT/Tailscale (`100.64.0.0/10`) or
-/// unspecified range, and for a hostname that is `localhost` (or ends in
-/// `.localhost`), has no dots, or ends in `.local`, `.lan`, `.internal` or
-/// `.home.arpa`. `Cloud` for every other host, and for a URL with no host
-/// (fail closed).
+/// The URL is parsed as the HTTP client parses it (`http://` is assumed
+/// when there is no scheme). `Local` for an IP in a loopback, private
+/// (RFC 1918, ULA `fc00::/7`), link-local, CGNAT/Tailscale
+/// (`100.64.0.0/10`) or unspecified range, and for a domain that is
+/// `localhost` (or ends in `.localhost`), is a single dotless label, or
+/// ends in `.local`, `.lan`, `.internal` or `.home.arpa`. A single label
+/// with a trailing dot (`ai.`) is a fully qualified name, so `Cloud`
+/// (`localhost.` stays `Local`). `Cloud` for every other host, for a
+/// scheme other than `http`/`https`, and for a URL that doesn't parse or
+/// has no host (fail closed).
 pub fn url_locality(url: &str) -> Locality {
-    url_host(url).map_or(Locality::Cloud, |host| host_locality(&host))
-}
-
-/// The lowercased host of `url`, without brackets, port, userinfo or a
-/// trailing dot. `None` when there is no host.
-pub(crate) fn url_host(url: &str) -> Option<String> {
-    let url = url.trim();
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or("");
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let host = match host_port.strip_prefix('[') {
-        Some(bracketed) => bracketed.split_once(']')?.0,
-        None => host_port.split(':').next().unwrap_or(""),
-    };
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    (!host.is_empty()).then_some(host)
-}
-
-fn host_locality(host: &str) -> Locality {
-    if let Some(ip) = parse_ip(host) {
-        return if ip_is_local(ip) {
-            Locality::Local
-        } else {
-            Locality::Cloud
-        };
+    match parse_host(url) {
+        Some(Host::Ipv4(ip)) => locality_if(v4_is_local(ip)),
+        Some(Host::Ipv6(ip)) => locality_if(ip_is_local(IpAddr::V6(ip))),
+        Some(Host::Domain(domain)) => locality_if(domain_is_local(&domain)),
+        None => Locality::Cloud,
     }
-    let local = host == "localhost"
-        || !host.contains('.')
-        || [".localhost", ".local", ".lan", ".internal", ".home.arpa"]
-            .iter()
-            .any(|suffix| host.ends_with(suffix));
+}
+
+/// The host of `url` as the HTTP client sees it (no brackets, port or
+/// userinfo). `None` when it doesn't parse or has no host.
+pub(crate) fn url_host(url: &str) -> Option<String> {
+    parse_host(url).map(|host| match host {
+        Host::Domain(domain) => domain,
+        Host::Ipv4(ip) => ip.to_string(),
+        Host::Ipv6(ip) => ip.to_string(),
+    })
+}
+
+fn parse_host(url: &str) -> Option<Host<String>> {
+    let url = url.trim();
+    let parsed = if url.contains("://") {
+        Url::parse(url)
+    } else {
+        Url::parse(&format!("http://{url}"))
+    }
+    .ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host()?.to_owned();
+    match &host {
+        Host::Domain(domain) if domain.is_empty() => None,
+        _ => Some(host),
+    }
+}
+
+fn locality_if(local: bool) -> Locality {
     if local {
         Locality::Local
     } else {
@@ -54,23 +66,19 @@ fn host_locality(host: &str) -> Locality {
     }
 }
 
-/// An IP literal, including the single-number IPv4 forms URL parsers
-/// accept (`2130706433`, `0x7f000001`), so a dotless number isn't mistaken
-/// for a LAN hostname.
-fn parse_ip(host: &str) -> Option<IpAddr> {
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Some(ip);
+/// `domain` is already lowercase ASCII (IDNA-normalised) from the parser.
+fn domain_is_local(domain: &str) -> bool {
+    let fqdn = domain.strip_suffix('.');
+    let name = fqdn.unwrap_or(domain);
+    if name.is_empty() || name.ends_with('.') {
+        return false;
     }
-    let n = match host.strip_prefix("0x") {
-        Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-        None if host.bytes().all(|b| b.is_ascii_digit()) => match host.parse::<u32>() {
-            Ok(n) => n,
-            // A number too large for IPv4 is no address at all.
-            Err(_) => return Some(IpAddr::V4(Ipv4Addr::BROADCAST)),
-        },
-        None => return None,
-    };
-    Some(IpAddr::V4(Ipv4Addr::from(n)))
+    name == "localhost"
+        // A dotless name is a LAN name, unless written fully qualified.
+        || (fqdn.is_none() && !name.contains('.'))
+        || [".localhost", ".local", ".lan", ".internal", ".home.arpa"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn ip_is_local(ip: IpAddr) -> bool {
@@ -159,6 +167,18 @@ mod tests {
             "http://localhost@evil.com",
             "",
             "http://",
+            // What the HTTP client connects to, not the raw string.
+            "http://api%2Egroq%2Ecom/v1",
+            "http://8%2E8%2E8%2E8/",
+            "http://api\u{3002}groq\u{3002}com/v1",
+            "http://api\u{ff0e}groq\u{ff0e}com",
+            "http://localhost%2Eevil%2Ecom/",
+            "http://0167772161/",
+            "http://ai./",
+            // Unparseable: fail closed.
+            "http://[2001:db8::1%25eth0]/",
+            "http://evil.com%2F.lan/",
+            "ftp://localhost",
         ] {
             assert_eq!(url_locality(url), Locality::Cloud, "{url}");
         }
@@ -172,6 +192,13 @@ mod tests {
         );
         assert_eq!(url_host("http://[::1]:80").as_deref(), Some("::1"));
         assert_eq!(url_host("http://u@h/p").as_deref(), Some("h"));
-        assert_eq!(url_host("http:///p"), None);
+        // What the client would connect to: WHATWG reads `http:///p` as host `p`.
+        assert_eq!(url_host("http:///p").as_deref(), Some("p"));
+        assert_eq!(url_host("http://"), None);
+        assert_eq!(
+            url_host("http://api%2Egroq%2Ecom/v1").as_deref(),
+            Some("api.groq.com")
+        );
+        assert_eq!(url_host("ftp://localhost"), None);
     }
 }

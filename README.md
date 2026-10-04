@@ -91,8 +91,12 @@ its kind:
   (`100.64.0.0/10`) range, or a hostname that is `localhost`, has no dots,
   or ends in `.local`, `.lan`, `.internal` or `.home.arpa`. Every other
   host is cloud, so an `openai_compat` endpoint at
-  `https://api.groq.com/openai/v1` is cloud. An endpoint with no address is
-  cloud too.
+  `https://api.groq.com/openai/v1` is cloud. The host is the one the HTTP
+  client connects to, after URL parsing (percent-escapes decoded, IDN dots
+  normalised, numeric IPv4 forms such as `0167772161` read as addresses);
+  a single name written with a trailing dot (`ai.`) is fully qualified, so
+  cloud. An endpoint with no address, a non-`http(s)` scheme, or a URL
+  that doesn't parse is cloud too.
 - `locality = "local"` on the endpoint marks a box on your network with a
   public-looking DNS name local; `locality = "cloud"` forces cloud. Neither
   makes a cloud kind local.
