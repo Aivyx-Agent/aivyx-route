@@ -111,13 +111,16 @@ base_url = "http://gpu.example.com:11434"
 locality = "local"
 ```
 
-The product's default backend takes its kind's locality; the product
-chooses that kind. An `endpoint` that is neither the product's default nor a
+The product's default backend (`DefaultEndpoint`) follows the same rule:
+the product passes its kind, its `base_url` (else the kind's default) and
+any `locality` override, so a remote default backend is cloud and one with
+no address at all is cloud too. An `endpoint` that is neither the product's default nor a
 `[routing.endpoints]` key (a typo, say) fails closed: its models are treated
 as cloud and unavailable, so they are never selected.
 
 `RoutingConfig::validate(&default)` reports unknown endpoints, duplicate
-models, local endpoints with no `base_url`, non-cloud endpoints whose
+models, local endpoints (the default included) with no `base_url`,
+non-cloud endpoints whose
 address makes them cloud, and ignored `locality = "local"` overrides;
 products warn at startup.
 
@@ -152,7 +155,12 @@ use aivyx_route::{
     DefaultEndpoint, EndpointKind, EndpointRef, Policy, Requirements, TaskKind, merge, select,
 };
 
-let default = DefaultEndpoint { name: EndpointRef::new("main"), kind: EndpointKind::Ollama };
+// The product's own backend, with its URL: its locality follows the same
+// rule as any endpoint's.
+let default = DefaultEndpoint {
+    base_url: Some("http://localhost:11434".into()),
+    ..DefaultEndpoint::new("main", EndpointKind::Ollama)
+};
 for issue in config.validate(&default) {
     eprintln!("warning: {issue}");
 }

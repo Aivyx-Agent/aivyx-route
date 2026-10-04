@@ -272,11 +272,12 @@ summarize = { tier = "small" }
 - Duplicate roster entries for the same (endpoint, id) apply in order,
   each overriding only the fields it sets.
 - Endpoint locality: `merge` takes the product's `DefaultEndpoint { name,
-  kind }`. The default name resolves to its kind's locality (so an
-  aivyx-pa default of Anthropic is `Cloud`); a `[routing.endpoints]` key
-  to `EndpointConfig::effective_locality()` (cloud kinds are `Cloud`;
-  other kinds follow their `base_url` host — local addresses only are
-  `Local` — unless the endpoint sets `locality`); **any other name fails
+  kind, base_url, locality }`. The default name and every
+  `[routing.endpoints]` key resolve by one rule
+  (`effective_locality()`): cloud kinds are `Cloud` (so an aivyx-pa
+  default of Anthropic is `Cloud`); other kinds follow their `base_url`
+  host — local addresses only are `Local`, no address is `Cloud` — unless
+  `locality` is set; **any other name fails
   closed** — `Cloud` and `Unavailable`, never selected. A roster
   `locality` only moves a model towards `Cloud` (never local on a cloud
   endpoint), and never changes availability. *(Amended 2026-10-04:

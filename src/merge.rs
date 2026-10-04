@@ -228,6 +228,8 @@ mod tests {
         DefaultEndpoint {
             name: ep(name),
             kind: EndpointKind::Ollama,
+            base_url: None,
+            locality: None,
         }
     }
 
@@ -373,6 +375,8 @@ mod tests {
         let default = DefaultEndpoint {
             name: ep("main"),
             kind: EndpointKind::OpenaiCompat,
+            base_url: None,
+            locality: None,
         };
         let reports = [reached("main", vec![found("m:latest", &[], None)])];
         let ps = merge(&config_with(vec![entry("m")]), &default, &reports);
@@ -572,6 +576,25 @@ base_url = "http://192.168.1.20:8080"
             select(&req, &groq_only, &Policy::default()).is_err(),
             "cloud off must never pick a hosted endpoint"
         );
+    }
+
+    #[test]
+    fn a_default_endpoint_at_a_hosted_address_makes_its_models_cloud() {
+        let hosted = DefaultEndpoint {
+            base_url: Some("https://api.groq.com/openai/v1".into()),
+            ..DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
+        };
+        let reports = [reached("main", vec![found("llama-3.3-70b", &[], None)])];
+        let ps = merge(&config_with(vec![entry("kimi")]), &hosted, &reports);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "kimi").locality, Locality::Cloud);
+        let lan = DefaultEndpoint {
+            base_url: Some("http://192.168.1.20:8080".into()),
+            ..DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
+        };
+        let ps = merge(&config_with(vec![entry("kimi")]), &lan, &reports);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Local);
+        assert_eq!(find(&ps, "kimi").locality, Locality::Local);
     }
 
     #[test]
@@ -800,6 +823,8 @@ base_url = "https://api.groq.com/openai/v1"
         let default = DefaultEndpoint {
             name: ep("main"),
             kind: EndpointKind::Anthropic,
+            base_url: None,
+            locality: None,
         };
         let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
         let ps = merge(&config, &default, &[]);
@@ -811,6 +836,8 @@ base_url = "https://api.groq.com/openai/v1"
         let default = DefaultEndpoint {
             name: ep("anthropic"),
             kind: EndpointKind::Anthropic,
+            base_url: None,
+            locality: None,
         };
         let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
         let p = find(&ps, "claude-sonnet-5");

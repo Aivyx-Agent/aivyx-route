@@ -91,6 +91,8 @@ context_window = 200000
         &DefaultEndpoint {
             name: EndpointRef::new("gpu"),
             kind: EndpointKind::Ollama,
+            base_url: None,
+            locality: None,
         },
         &reports,
     );
@@ -176,6 +178,8 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
         &DefaultEndpoint {
             name: EndpointRef::new("local"),
             kind: EndpointKind::OpenaiCompat,
+            base_url: Some(server.uri()),
+            locality: None,
         },
         &reports,
     );
@@ -193,6 +197,8 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
         &DefaultEndpoint {
             name: EndpointRef::new("local"),
             kind: EndpointKind::OpenaiCompat,
+            base_url: Some(server.uri()),
+            locality: None,
         },
         &reports,
     );

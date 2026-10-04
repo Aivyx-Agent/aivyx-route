@@ -41,11 +41,40 @@ impl Default for RoutingConfig {
 }
 
 /// The product's own default backend: where roster entries without an
-/// `endpoint` live. Its kind decides their locality.
+/// `endpoint` live. Its locality follows the same rule as a
+/// `[routing.endpoints]` entry's ([`EndpointConfig::effective_locality`]),
+/// so the product passes the backend's URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultEndpoint {
     pub name: EndpointRef,
     pub kind: EndpointKind,
+    /// The backend's URL; `None` falls back to the kind's default.
+    pub base_url: Option<String>,
+    /// Operator override of the locality the address implies, as on an
+    /// endpoint.
+    pub locality: Option<Locality>,
+}
+
+impl DefaultEndpoint {
+    /// A default endpoint with no URL of its own and no override.
+    pub fn new(name: impl Into<String>, kind: EndpointKind) -> Self {
+        DefaultEndpoint {
+            name: EndpointRef::new(name),
+            kind,
+            base_url: None,
+            locality: None,
+        }
+    }
+
+    /// The configured URL, else the kind's default.
+    pub fn base_url(&self) -> Option<&str> {
+        self.base_url.as_deref().or(self.kind.default_base_url())
+    }
+
+    /// Same rule as [`EndpointConfig::effective_locality`].
+    pub fn effective_locality(&self) -> Locality {
+        effective_locality(self.kind, self.base_url(), self.locality)
+    }
 }
 
 /// A problem [`RoutingConfig::validate`] found. None is fatal; products
@@ -117,12 +146,12 @@ impl fmt::Display for ConfigIssue {
 
 impl RoutingConfig {
     /// The locality of the endpoint named `name`: the default endpoint's
-    /// kind's, or a `[routing.endpoints]` entry's
+    /// [`effective_locality`](DefaultEndpoint::effective_locality), or a `[routing.endpoints]` entry's
     /// [`effective_locality`](EndpointConfig::effective_locality). `None`
     /// for a name that is neither (callers fail closed to `Cloud`).
     pub fn endpoint_locality(&self, default: &DefaultEndpoint, name: &str) -> Option<Locality> {
         if name == default.name.as_str() {
-            Some(default.kind.locality())
+            Some(default.effective_locality())
         } else {
             self.endpoints
                 .get(name)
@@ -130,34 +159,20 @@ impl RoutingConfig {
         }
     }
 
-    /// Report configuration mistakes. Pure; endpoint issues come first (in
-    /// name order), then roster issues (in roster order).
+    /// Report configuration mistakes. Pure; the default endpoint's issues
+    /// come first, then other endpoints' (in name order), then roster
+    /// issues (in roster order).
     pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
         let mut issues = Vec::new();
+        endpoint_issues(
+            default.name.as_str(),
+            default.kind,
+            default.base_url(),
+            default.locality,
+            &mut issues,
+        );
         for (name, c) in &self.endpoints {
-            let cloud_kind = c.kind.locality() == Locality::Cloud;
-            match c.base_url() {
-                None if !cloud_kind => issues.push(ConfigIssue::MissingBaseUrl {
-                    endpoint: name.clone(),
-                }),
-                Some(url)
-                    if !cloud_kind
-                        && c.locality.is_none()
-                        && url_locality(url) == Locality::Cloud =>
-                {
-                    issues.push(ConfigIssue::NonLocalAddress {
-                        endpoint: name.clone(),
-                        host: url_host(url).unwrap_or_default(),
-                    });
-                }
-                _ => {}
-            }
-            if cloud_kind && c.locality == Some(Locality::Local) {
-                issues.push(ConfigIssue::LocalOverrideIgnored {
-                    endpoint: name.clone(),
-                    model: None,
-                });
-            }
+            endpoint_issues(name, c.kind, c.base_url(), c.locality, &mut issues);
         }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
@@ -186,6 +201,52 @@ impl RoutingConfig {
             }
         }
         issues
+    }
+}
+
+/// Locality issues and a missing URL for one endpoint.
+fn endpoint_issues(
+    name: &str,
+    kind: EndpointKind,
+    base_url: Option<&str>,
+    locality: Option<Locality>,
+    issues: &mut Vec<ConfigIssue>,
+) {
+    let cloud_kind = kind.locality() == Locality::Cloud;
+    match base_url {
+        None if !cloud_kind => issues.push(ConfigIssue::MissingBaseUrl {
+            endpoint: name.to_owned(),
+        }),
+        Some(url) if !cloud_kind && locality.is_none() && url_locality(url) == Locality::Cloud => {
+            issues.push(ConfigIssue::NonLocalAddress {
+                endpoint: name.to_owned(),
+                host: url_host(url).unwrap_or_else(|| url.to_owned()),
+            });
+        }
+        _ => {}
+    }
+    if cloud_kind && locality == Some(Locality::Local) {
+        issues.push(ConfigIssue::LocalOverrideIgnored {
+            endpoint: name.to_owned(),
+            model: None,
+        });
+    }
+}
+
+/// The one locality rule for an endpoint, default or configured: cloud
+/// kinds are `Cloud`; otherwise an explicit `locality` wins, else the URL
+/// host decides ([`url_locality`]); no URL is `Cloud` (fail closed).
+fn effective_locality(
+    kind: EndpointKind,
+    base_url: Option<&str>,
+    locality: Option<Locality>,
+) -> Locality {
+    if kind.locality() == Locality::Cloud {
+        return Locality::Cloud;
+    }
+    match locality {
+        Some(locality) => locality,
+        None => base_url.map_or(Locality::Cloud, url_locality),
     }
 }
 
@@ -253,13 +314,7 @@ impl EndpointConfig {
     /// wins, else the [`base_url`](Self::base_url) host decides
     /// ([`url_locality`]); no URL at all is `Cloud` (fail closed).
     pub fn effective_locality(&self) -> Locality {
-        if self.kind.locality() == Locality::Cloud {
-            return Locality::Cloud;
-        }
-        match self.locality {
-            Some(locality) => locality,
-            None => self.base_url().map_or(Locality::Cloud, url_locality),
-        }
+        effective_locality(self.kind, self.base_url(), self.locality)
     }
 }
 
@@ -433,6 +488,8 @@ summarize = { tier = "small" }
         DefaultEndpoint {
             name: EndpointRef::new("main"),
             kind: EndpointKind::Ollama,
+            base_url: None,
+            locality: None,
         }
     }
 
@@ -670,6 +727,8 @@ locality = "local"
         let cloud_default = DefaultEndpoint {
             name: EndpointRef::new("main"),
             kind: EndpointKind::Anthropic,
+            base_url: None,
+            locality: None,
         };
         let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
             .unwrap()
@@ -679,6 +738,102 @@ locality = "local"
             vec![ConfigIssue::LocalOverrideIgnored {
                 endpoint: "main".into(),
                 model: Some("x".into())
+            }]
+        );
+    }
+
+    fn default_at(
+        kind: EndpointKind,
+        url: Option<&str>,
+        locality: Option<Locality>,
+    ) -> DefaultEndpoint {
+        DefaultEndpoint {
+            base_url: url.map(Into::into),
+            locality,
+            ..DefaultEndpoint::new("main", kind)
+        }
+    }
+
+    #[test]
+    fn the_default_endpoint_follows_the_endpoint_locality_rule() {
+        use EndpointKind::*;
+        use Locality::*;
+        for (kind, url, locality, want) in [
+            (
+                OpenaiCompat,
+                Some("https://api.groq.com/openai/v1"),
+                None,
+                Cloud,
+            ),
+            (Ollama, Some("http://gpu.example.com:11434"), None, Cloud),
+            (OpenaiCompat, Some("http://127.0.0.1:8080"), None, Local),
+            (
+                OpenaiCompat,
+                Some("http://192.168.1.20:8080/v1"),
+                None,
+                Local,
+            ),
+            (LlamaRouter, Some("http://gpu.lan:8080"), None, Local),
+            // The kind's default URL.
+            (Ollama, None, None, Local),
+            // No address at all fails closed.
+            (OpenaiCompat, None, None, Cloud),
+            (
+                Ollama,
+                Some("http://gpu.example.com:11434"),
+                Some(Local),
+                Local,
+            ),
+            (Ollama, Some("http://localhost:11434"), Some(Cloud), Cloud),
+            (Anthropic, Some("http://127.0.0.1:9"), Some(Local), Cloud),
+        ] {
+            let d = default_at(kind, url, locality);
+            assert_eq!(
+                d.effective_locality(),
+                want,
+                "{kind:?} {url:?} {locality:?}"
+            );
+            assert_eq!(
+                RoutingConfig::default().endpoint_locality(&d, "main"),
+                Some(want)
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_default_endpoint_locality_surprises() {
+        let c = RoutingConfig::default();
+        let hosted = default_at(
+            EndpointKind::OpenaiCompat,
+            Some("https://api.groq.com/openai/v1"),
+            None,
+        );
+        assert_eq!(
+            c.validate(&hosted),
+            vec![ConfigIssue::NonLocalAddress {
+                endpoint: "main".into(),
+                host: "api.groq.com".into()
+            }]
+        );
+        let lan = default_at(
+            EndpointKind::OpenaiCompat,
+            Some("http://10.0.0.2:8080"),
+            None,
+        );
+        assert_eq!(c.validate(&lan), vec![]);
+        let nowhere = default_at(EndpointKind::OpenaiCompat, None, None);
+        assert_eq!(
+            c.validate(&nowhere),
+            vec![ConfigIssue::MissingBaseUrl {
+                endpoint: "main".into()
+            }]
+        );
+        let claude = default_at(EndpointKind::Anthropic, None, Some(Locality::Local));
+        assert_eq!(
+            c.validate(&claude),
+            vec![ConfigIssue::LocalOverrideIgnored {
+                endpoint: "main".into(),
+                model: None
             }]
         );
     }
