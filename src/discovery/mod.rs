@@ -64,6 +64,14 @@ pub fn client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// `deadline` from now; [`DISCOVERY_DEADLINE`] from now when that is
+/// past what an `Instant` can hold.
+fn deadline_after(deadline: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(deadline)
+        .unwrap_or_else(|| now + DISCOVERY_DEADLINE)
+}
+
 /// Why one discovery request failed.
 #[derive(Debug)]
 pub(crate) enum FetchError {
@@ -142,14 +150,15 @@ pub async fn discover(
     discover_within(endpoint, config, client, DISCOVERY_DEADLINE).await
 }
 
-/// Probe one endpoint, within `deadline`.
+/// Probe one endpoint, within `deadline` ([`DISCOVERY_DEADLINE`] if
+/// `deadline` is too large to represent).
 pub async fn discover_within(
     endpoint: &EndpointRef,
     config: &EndpointConfig,
     client: &reqwest::Client,
     deadline: Duration,
 ) -> DiscoveryReport {
-    discover_until(endpoint, config, client, Instant::now() + deadline).await
+    discover_until(endpoint, config, client, deadline_after(deadline)).await
 }
 
 async fn discover_until(
@@ -160,7 +169,7 @@ async fn discover_until(
 ) -> DiscoveryReport {
     // Every request already stops at `deadline`; this is the backstop.
     let outcome = timeout_at(
-        deadline + DEADLINE_GRACE,
+        deadline.checked_add(DEADLINE_GRACE).unwrap_or(deadline),
         probe(endpoint, config, client, deadline),
     )
     .await
@@ -216,13 +225,14 @@ pub async fn discover_all(
     discover_all_within(config, client, DISCOVERY_DEADLINE).await
 }
 
-/// [`discover_all`] with its own overall deadline.
+/// [`discover_all`] with its own overall deadline ([`DISCOVERY_DEADLINE`]
+/// if `deadline` is too large to represent).
 pub async fn discover_all_within(
     config: &RoutingConfig,
     client: &reqwest::Client,
     deadline: Duration,
 ) -> Vec<DiscoveryReport> {
-    let deadline = Instant::now() + deadline;
+    let deadline = deadline_after(deadline);
     let names: Vec<EndpointRef> = config
         .endpoints
         .keys()
@@ -564,6 +574,19 @@ mod tests {
             let why = unreachable_reason(r.outcome);
             assert!(why.contains("redirect"), "{why}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_huge_deadline_falls_back_to_the_default_instead_of_overflowing() {
+        let server = slow_ollama(1, Duration::ZERO, Duration::ZERO).await;
+        let config = cfg(EndpointKind::Ollama, Some(&server.uri()));
+        let client = reqwest::Client::new();
+        let r = discover_within(&EndpointRef::new("o"), &config, &client, Duration::MAX).await;
+        assert_eq!(models_of(&r.outcome).len(), 1);
+        let mut all = RoutingConfig::default();
+        all.endpoints.insert("o".into(), config);
+        let reports = discover_all_within(&all, &client, Duration::MAX).await;
+        assert_eq!(models_of(&reports[0].outcome).len(), 1);
     }
 
     #[tokio::test]

@@ -186,8 +186,9 @@ impl Router {
         self.state.lock().unwrap().last.get(session).cloned()
     }
 
-    /// Pins `session`'s main thread (sticky task kinds) to `key`. A pin
-    /// to a cloud model is ignored (but kept) while cloud routing is off.
+    /// Pins `session`'s main thread (sticky task kinds) to `key`. While
+    /// cloud routing is off, a pin to a cloud model or to one not among the
+    /// candidates is ignored (but kept).
     /// Any sticky model is dropped: it's unused while pinned, and would
     /// otherwise resurface if the pin were later evicted by the session cap.
     pub fn pin(&self, session: &str, key: ModelKey) {
@@ -245,8 +246,9 @@ impl Router {
         let mut state = self.state.lock().unwrap();
         state.cooling.retain(|_, until| *until > now);
 
-        // A pin to a cloud model while cloud routing is off is ignored (but
-        // kept): selection runs as if unpinned, and the reason says so.
+        // While cloud routing is off, a pin to a cloud model, or to one no
+        // longer among the candidates (it could be anywhere), is ignored
+        // (but kept): selection runs as if unpinned, and the reason says so.
         let mut ignored_pin = None;
         if let Some(session) = &sticky_session
             && let Some(pin) = state.pins.get(session).cloned()
@@ -255,9 +257,16 @@ impl Router {
             // pins first.
             state.pins.insert(session.clone(), pin.clone());
             let profile = find(&state.profiles, &pin);
-            if profile.is_some_and(|p| p.locality == Locality::Cloud) && !self.allow_cloud {
+            let why_ignored = match profile {
+                _ if self.allow_cloud => None,
+                Some(p) if p.locality == Locality::Cloud => Some("it's a cloud model"),
+                Some(_) => None,
+                // Nothing says where it is: fail closed.
+                None => Some("it isn't among the current candidates"),
+            };
+            if let Some(why) = why_ignored {
                 ignored_pin = Some(format!(
-                    "ignored pin to `{pin}`: it's a cloud model and cloud routing is off; "
+                    "ignored pin to `{pin}`: {why} and cloud routing is off; "
                 ));
             } else {
                 return Ok(self.pinned_plan(query, &req, pin, profile, sticky_session));
@@ -633,9 +642,10 @@ mod tests {
 
     #[test]
     fn a_pin_to_a_model_that_is_no_longer_a_candidate_is_kept_but_flagged() {
-        // Pins win (never silently overridden), but a refresh that drops the
-        // pinned model must not leave a clean-looking reason behind.
-        let r = router(three());
+        // With cloud routing on, pins win (never silently overridden), but a
+        // refresh that drops the pinned model must not leave a
+        // clean-looking reason behind.
+        let r = router(three()).with_allow_cloud(true);
         r.pin("s", key("gpu", "tiny"));
         r.set_profiles(vec![p("backend", "default", Tier::Medium, &[])]);
         let plan = r
@@ -648,6 +658,27 @@ mod tests {
             "{}",
             plan.reason
         );
+    }
+
+    /// With cloud routing off, a pin to a model routing knows nothing
+    /// about could be anywhere: it is ignored (fail closed), but kept.
+    #[test]
+    fn a_pin_to_an_unknown_model_is_ignored_while_cloud_routing_is_off() {
+        let r = router(three());
+        r.pin("s", key("gpu", "tiny"));
+        r.set_profiles(vec![p("backend", "default", Tier::Medium, &[])]);
+        let plan = r
+            .plan(&q(TaskKind::CodeEdit, Some("s")), Instant::now())
+            .unwrap();
+        assert_eq!(plan.chain, vec![key("backend", "default")]);
+        assert!(
+            plan.reason.starts_with(
+                "ignored pin to `tiny@gpu`: it isn't among the current candidates and cloud routing is off; chose"
+            ),
+            "{}",
+            plan.reason
+        );
+        assert_eq!(r.pinned("s"), Some(key("gpu", "tiny")));
     }
 
     #[test]

@@ -135,7 +135,7 @@ otherwise unknown, as is audio; the base is `.../api`, and a trailing
 discovery reports them `NotProbed` and residency skips them. Endpoints are
 probed concurrently, Ollama's `/api/show` calls 8 at a time, and the whole
 run stops at a deadline (15 s; `discover_all_within` / `discover_within`
-take another): whatever was found by then is returned, a model whose
+take another, and fall back to 15 s for one too large to represent): whatever was found by then is returned, a model whose
 details hadn't arrived keeps its capabilities unknown, and an endpoint that
 hadn't listed its models is reported unreachable ("timed out"). Tiers and
 strengths always come from the roster — no backend reports quality.
@@ -205,10 +205,12 @@ Semantics (operator-approved in model-routing Part 2):
 - a fallback, or a choice made while any model was cooling, never becomes a
   session's sticky model;
 - a pin never writes the sticky map, and `unpin` clears it too;
-- a pin wins over ranking (a model that may lack a need, or is no longer a
-  candidate, is still used, with a warning in the reason) — except a pin
-  to a cloud model while cloud routing is off: selection then runs as if
-  unpinned, the reason starts "ignored pin to …", and the pin is kept.
+- a pin wins over ranking (a model that may lack a need is still used,
+  with a warning in the reason). While cloud routing is off, a pin to a
+  cloud model, or to one no longer among the candidates (nothing says
+  where it is), is ignored: selection runs as if unpinned, the reason
+  starts "ignored pin to …", and the pin is kept. With cloud routing on, a
+  pin to a model no longer among the candidates is used, with a warning.
 
 ## Residency (Part 4)
 
