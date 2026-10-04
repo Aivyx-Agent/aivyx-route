@@ -123,7 +123,12 @@ OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded
 models only; its `labels` map to capabilities — `reasoning` marks a
 thinking model, but an unlabelled one may still think, so thinking is
 otherwise unknown, as is audio; the base is `.../api`, and a trailing
-`/v1` is tolerated). Cloud endpoints are never probed. Tiers and
+`/v1` is tolerated). Cloud endpoints are never probed. Endpoints are
+probed concurrently, Ollama's `/api/show` calls 8 at a time, and the whole
+run stops at a deadline (15 s; `discover_all_within` / `discover_within`
+take another): whatever was found by then is returned, a model whose
+details hadn't arrived keeps its capabilities unknown, and an endpoint that
+hadn't listed its models is reported unreachable ("timed out"). Tiers and
 strengths always come from the roster — no backend reports quality.
 Ollama's discovered context window is the model's *trained* length, not
 the `num_ctx` it is served with: set the roster `context_window` to your

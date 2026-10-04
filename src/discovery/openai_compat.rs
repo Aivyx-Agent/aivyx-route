@@ -3,7 +3,9 @@
 
 use serde::Deserialize;
 
-use super::REQUEST_TIMEOUT;
+use tokio::time::Instant;
+
+use super::{FetchError, fetch_json};
 use crate::merge::DiscoveredModel;
 use crate::profile::{Capability, CapabilitySet};
 
@@ -30,15 +32,9 @@ fn models_url(base: &str) -> String {
 pub(super) async fn discover(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<DiscoveredModel>, reqwest::Error> {
-    let models: Models = client
-        .get(models_url(base))
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    deadline: Instant,
+) -> Result<Vec<DiscoveredModel>, FetchError> {
+    let models: Models = fetch_json(client.get(models_url(base)), deadline).await?;
     Ok(models
         .data
         .into_iter()
@@ -75,7 +71,13 @@ mod tests {
             .mount(&server)
             .await;
         for base in [server.uri(), format!("{}/v1", server.uri())] {
-            let models = discover(&base, &reqwest::Client::new()).await.unwrap();
+            let models = discover(
+                &base,
+                &reqwest::Client::new(),
+                crate::discovery::far_deadline(),
+            )
+            .await
+            .unwrap();
             assert_eq!(models.len(), 1, "{base}");
             assert_eq!(models[0].id, "qwen3-8b-q4_k_m.gguf");
             assert!(models[0].capabilities.is_empty());

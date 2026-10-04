@@ -3,7 +3,9 @@
 
 use serde::Deserialize;
 
-use super::REQUEST_TIMEOUT;
+use tokio::time::Instant;
+
+use super::{FetchError, fetch_json};
 use crate::merge::DiscoveredModel;
 use crate::profile::{Capability, CapabilitySet};
 
@@ -28,15 +30,9 @@ struct Architecture {
 pub(super) async fn discover(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<DiscoveredModel>, reqwest::Error> {
-    let models: Models = client
-        .get(format!("{base}/models"))
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    deadline: Instant,
+) -> Result<Vec<DiscoveredModel>, FetchError> {
+    let models: Models = fetch_json(client.get(format!("{base}/models")), deadline).await?;
     Ok(models
         .data
         .into_iter()
@@ -96,9 +92,13 @@ mod tests {
             ))
             .mount(&server)
             .await;
-        let models = discover(&server.uri(), &reqwest::Client::new())
-            .await
-            .unwrap();
+        let models = discover(
+            &server.uri(),
+            &reqwest::Client::new(),
+            crate::discovery::far_deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "ggml-org/gemma-3-4b-it-GGUF:Q4_K_M");
         assert_eq!(
@@ -137,9 +137,13 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            discover(&server.uri(), &reqwest::Client::new())
-                .await
-                .is_err()
+            discover(
+                &server.uri(),
+                &reqwest::Client::new(),
+                crate::discovery::far_deadline()
+            )
+            .await
+            .is_err()
         );
     }
 }

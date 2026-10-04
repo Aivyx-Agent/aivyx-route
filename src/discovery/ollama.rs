@@ -4,7 +4,10 @@
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use super::REQUEST_TIMEOUT;
+use futures_util::{StreamExt, stream};
+use tokio::time::Instant;
+
+use super::{FetchError, SHOW_CONCURRENCY, fetch_json};
 use crate::merge::DiscoveredModel;
 use crate::profile::{Capability, CapabilitySet};
 
@@ -29,48 +32,47 @@ struct Show {
 pub(super) async fn discover(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<DiscoveredModel>, reqwest::Error> {
-    let tags: Tags = client
-        .get(format!("{base}/api/tags"))
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let mut out = Vec::with_capacity(tags.models.len());
-    for entry in tags.models {
-        // A failed /api/show still leaves a usable model whose capabilities
-        // are all unknown.
-        let model = match show(base, &entry.name, client).await {
-            Ok(show) => DiscoveredModel {
-                capabilities: parse_capabilities(&show.capabilities),
-                unknown_capabilities: CapabilitySet::new(),
-                context_window: context_length(&show.model_info),
-                id: entry.name,
-            },
-            Err(_) => DiscoveredModel {
-                id: entry.name,
-                capabilities: CapabilitySet::new(),
-                unknown_capabilities: Capability::ALL.into_iter().collect(),
-                context_window: None,
-            },
-        };
-        out.push(model);
-    }
-    Ok(out)
+    deadline: Instant,
+) -> Result<Vec<DiscoveredModel>, FetchError> {
+    let tags: Tags = fetch_json(client.get(format!("{base}/api/tags")), deadline).await?;
+    let models = stream::iter(tags.models)
+        .map(|entry| async move {
+            // A failed (or too late) /api/show still leaves a usable model
+            // whose capabilities are all unknown.
+            match show(base, &entry.name, client, deadline).await {
+                Ok(show) => DiscoveredModel {
+                    capabilities: parse_capabilities(&show.capabilities),
+                    unknown_capabilities: CapabilitySet::new(),
+                    context_window: context_length(&show.model_info),
+                    id: entry.name,
+                },
+                Err(_) => DiscoveredModel {
+                    id: entry.name,
+                    capabilities: CapabilitySet::new(),
+                    unknown_capabilities: Capability::ALL.into_iter().collect(),
+                    context_window: None,
+                },
+            }
+        })
+        .buffered(SHOW_CONCURRENCY)
+        .collect()
+        .await;
+    Ok(models)
 }
 
-async fn show(base: &str, model: &str, client: &reqwest::Client) -> Result<Show, reqwest::Error> {
-    client
-        .post(format!("{base}/api/show"))
-        .json(&json!({ "model": model }))
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
+async fn show(
+    base: &str,
+    model: &str,
+    client: &reqwest::Client,
+    deadline: Instant,
+) -> Result<Show, FetchError> {
+    fetch_json(
+        client
+            .post(format!("{base}/api/show"))
+            .json(&json!({ "model": model })),
+        deadline,
+    )
+    .await
 }
 
 /// Ollama's `"image"` capability means image *generation*, not image input,
@@ -133,9 +135,13 @@ mod tests {
         mount_show(&server, "qwen3-coder:30b", SHOW_QWEN).await;
         mount_show(&server, "nomic-embed-text:latest", SHOW_EMBED).await;
 
-        let models = discover(&server.uri(), &reqwest::Client::new())
-            .await
-            .unwrap();
+        let models = discover(
+            &server.uri(),
+            &reqwest::Client::new(),
+            crate::discovery::far_deadline(),
+        )
+        .await
+        .unwrap();
         let get = |id: &str| models.iter().find(|m| m.id == id).unwrap().clone();
         assert_eq!(models.len(), 3);
         assert_eq!(
@@ -167,9 +173,13 @@ mod tests {
             .mount(&server)
             .await;
         // No /api/show mock: wiremock answers 404.
-        let models = discover(&server.uri(), &reqwest::Client::new())
-            .await
-            .unwrap();
+        let models = discover(
+            &server.uri(),
+            &reqwest::Client::new(),
+            crate::discovery::far_deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "mystery:1b");
         assert!(models[0].capabilities.is_empty());
@@ -189,9 +199,13 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            discover(&server.uri(), &reqwest::Client::new())
-                .await
-                .is_err()
+            discover(
+                &server.uri(),
+                &reqwest::Client::new(),
+                crate::discovery::far_deadline()
+            )
+            .await
+            .is_err()
         );
     }
 

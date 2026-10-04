@@ -5,7 +5,9 @@
 
 use serde::Deserialize;
 
-use super::REQUEST_TIMEOUT;
+use tokio::time::Instant;
+
+use super::{FetchError, fetch_json};
 use crate::merge::DiscoveredModel;
 use crate::profile::{Capability, CapabilitySet};
 
@@ -28,15 +30,9 @@ struct Entry {
 pub(super) async fn discover(
     base: &str,
     client: &reqwest::Client,
-) -> Result<Vec<DiscoveredModel>, reqwest::Error> {
-    let models: Models = client
-        .get(api_url(base, "models"))
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    deadline: Instant,
+) -> Result<Vec<DiscoveredModel>, FetchError> {
+    let models: Models = fetch_json(client.get(api_url(base, "models")), deadline).await?;
     Ok(models
         .data
         .into_iter()
@@ -106,9 +102,13 @@ mod tests {
             .respond_with(json_response(MODELS))
             .mount(&server)
             .await;
-        let models = discover(&server.uri(), &reqwest::Client::new())
-            .await
-            .unwrap();
+        let models = discover(
+            &server.uri(),
+            &reqwest::Client::new(),
+            crate::discovery::far_deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(models.len(), 2, "the undownloaded model is skipped");
         let get = |id: &str| models.iter().find(|m| m.id == id).unwrap().clone();
 
@@ -153,9 +153,13 @@ mod tests {
             .mount(&server)
             .await;
         assert!(
-            discover(&server.uri(), &reqwest::Client::new())
-                .await
-                .is_err()
+            discover(
+                &server.uri(),
+                &reqwest::Client::new(),
+                crate::discovery::far_deadline()
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -218,9 +222,13 @@ mod tests {
             .respond_with(json_response(MODELS))
             .mount(&server)
             .await;
-        let models = discover(&format!("{}/api/v1", server.uri()), &reqwest::Client::new())
-            .await
-            .unwrap();
+        let models = discover(
+            &format!("{}/api/v1", server.uri()),
+            &reqwest::Client::new(),
+            crate::discovery::far_deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(models.len(), 2);
     }
 }
