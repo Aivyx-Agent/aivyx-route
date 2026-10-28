@@ -50,3 +50,11 @@ allow = [
 ]
 
 # No per-crate license exceptions.
+
+[advisories]
+version = 2
+# New advisories fail CI. Unmaintained crates are reported too, so they
+# surface; accepted ones go in `ignore` with the reason.
+yanked = "deny"
+unmaintained = "all"
+ignore = []
