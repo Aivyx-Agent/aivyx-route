@@ -28,6 +28,10 @@ cargo deny check licenses
 Single crate, no workspace — no `-p` flag needed. Plain `cargo test`
 skips the discovery clients (feature `discovery`, off by default).
 
+## Stable surface
+
+`RoutingConfig` and the types under it are embedded verbatim in aivyx-pa's and aivyx-coder's `[routing]`, so from their 1.0 they are part of both products' stable surface. In 1.x that means only additions: no renames, no removals, no changed meanings. A pin bump in either product fails its stable-surface snapshot test if they change.
+
 ## Architecture
 
 - `src/profile.rs` — `ModelProfile` and its vocabulary types.
