@@ -144,9 +144,10 @@ the `num_ctx` it is served with: set the roster `context_window` to your
 serving value (Part 4 will read it from `/api/ps`). Discovery and
 residency read at most 8 MiB per response (`MAX_BODY_BYTES`) and refuse a
 redirect; `aivyx_route::discovery::client()` builds a client that doesn't
-follow one in the first place. The discovery module re-exports `reqwest`,
-so a consumer on another major builds its client as
-`aivyx_route::discovery::reqwest::Client::new()`.
+follow one in the first place and never uses a proxy (discovery only
+contacts local endpoints, and reqwest otherwise sends even loopback
+requests to `HTTP_PROXY`). Use it rather than `reqwest::Client::new()`;
+the discovery module re-exports `reqwest` for consumers on another major.
 
 ## Use
 

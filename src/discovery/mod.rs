@@ -28,8 +28,8 @@ use serde::de::DeserializeOwned;
 use tokio::time::{Instant, timeout_at};
 
 /// The `reqwest` this crate is built against. Consumers on a different
-/// reqwest major build the client as
-/// `aivyx_route::discovery::reqwest::Client::new()`.
+/// reqwest major should still build the client with [`client`], not
+/// `reqwest::Client::new()`, which follows redirects and proxies.
 pub use reqwest;
 
 use crate::config::{EndpointConfig, EndpointKind, RoutingConfig};
@@ -54,13 +54,17 @@ const DEADLINE_GRACE: Duration = Duration::from_millis(250);
 /// larger is refused.
 pub const MAX_BODY_BYTES: u64 = 8 << 20;
 
-/// A client for discovery and residency that never follows redirects.
-/// [`discover`] and [`residency::collect`] refuse a redirected response
-/// with any client, but a client that follows one has already sent the
-/// second request.
+/// A client for discovery and residency that never follows redirects and
+/// never uses a proxy. [`discover`] and [`residency::collect`] refuse a
+/// redirected response with any client, but a client that follows one has
+/// already sent the second request. Discovery only contacts local
+/// endpoints, and reqwest otherwise sends even loopback requests to
+/// `HTTP_PROXY`/`ALL_PROXY` when one is set (aivyx-vision audit 2026-11-11,
+/// X1).
 pub fn client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
 }
 
