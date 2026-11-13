@@ -2,6 +2,8 @@
 
 [![License: BUSL-1.1](https://img.shields.io/badge/license-BUSL--1.1-blue.svg)](LICENSE)
 
+Part of the [Aivyx Ecosystem](https://aivyx-ecosystem.com/building-blocks/): a shared building block of [Aivyx PA](https://aivyx-ecosystem.com/pa/) and [aivyx-coder](https://aivyx-ecosystem.com/coder/).
+
 Task-aware model routing shared by `aivyx-pa` and `aivyx-coder`. Given the
 models you have (auto-discovered and/or declared) and what a request needs,
 it picks one deterministically and says why.
