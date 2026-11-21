@@ -41,6 +41,15 @@ pub(crate) fn url_host(url: &str) -> Option<String> {
 }
 
 fn parse_host(url: &str) -> Option<Host<String>> {
+    let host = parse_http_url(url)?.host()?.to_owned();
+    match &host {
+        Host::Domain(domain) if domain.is_empty() => None,
+        _ => Some(host),
+    }
+}
+
+/// `url` parsed as the HTTP client parses it, `None` unless it is http(s).
+pub(crate) fn parse_http_url(url: &str) -> Option<Url> {
     let url = url.trim();
     // An http(s) URL is classified exactly as the client will parse it,
     // whatever its slash spelling (`http:/host`, `http:\\host`, …); only a
@@ -53,11 +62,7 @@ fn parse_host(url: &str) -> Option<Host<String>> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    let host = parsed.host()?.to_owned();
-    match &host {
-        Host::Domain(domain) if domain.is_empty() => None,
-        _ => Some(host),
-    }
+    Some(parsed)
 }
 
 /// Whether `url` starts with an `http:`/`https:` scheme, in any case.
@@ -75,7 +80,7 @@ fn locality_if(local: bool) -> Locality {
 }
 
 /// `domain` is already lowercase ASCII (IDNA-normalised) from the parser.
-fn domain_is_local(domain: &str) -> bool {
+pub(crate) fn domain_is_local(domain: &str) -> bool {
     let fqdn = domain.strip_suffix('.');
     let name = fqdn.unwrap_or(domain);
     if name.is_empty() || name.ends_with('.') {
@@ -89,7 +94,7 @@ fn domain_is_local(domain: &str) -> bool {
             .any(|suffix| name.ends_with(suffix))
 }
 
-fn ip_is_local(ip: IpAddr) -> bool {
+pub(crate) fn ip_is_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4_is_local(v4),
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {

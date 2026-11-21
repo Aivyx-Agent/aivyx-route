@@ -8,6 +8,7 @@ pub mod classifier;
 pub mod config;
 #[cfg(feature = "discovery")]
 pub mod discovery;
+pub mod guard;
 pub mod locality;
 pub mod merge;
 pub mod profile;
@@ -20,6 +21,7 @@ pub mod sessions;
 pub use config::{
     ConfigIssue, DefaultEndpoint, EndpointConfig, EndpointKind, RosterEntry, RoutingConfig,
 };
+pub use guard::{NotLocal, NotLocalReason, Resolve, SystemResolver, require_local, require_local_with};
 pub use locality::url_locality;
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
