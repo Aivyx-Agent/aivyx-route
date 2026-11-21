@@ -206,6 +206,7 @@ mod tests {
             "ftp://127.0.0.1",
             "unix:/x",
             "foo:/evil.com",
+            "localhost:/x",
         ] {
             assert_eq!(url_locality(url), Locality::Cloud, "{url}");
         }

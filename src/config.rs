@@ -54,6 +54,10 @@ pub struct DefaultEndpoint {
     /// Operator override of the locality the address implies, as on an
     /// endpoint.
     pub locality: Option<Locality>,
+    /// Set by [`RoutingConfig::verify_local`]: the `locality = "local"`
+    /// override was honoured because `require_local` passed. Never from
+    /// config; `false` fails closed.
+    pub dns_local: bool,
 }
 
 impl DefaultEndpoint {
@@ -64,6 +68,7 @@ impl DefaultEndpoint {
             kind,
             base_url: None,
             locality: None,
+            dns_local: false,
         }
     }
 
@@ -74,7 +79,7 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.base_url(), self.locality)
+        effective_locality(self.base_url(), self.locality, self.dns_local)
     }
 }
 
@@ -90,15 +95,16 @@ pub enum ConfigIssue {
     DuplicateModel { endpoint: String, model: String },
     /// A local endpoint with no `base_url` and no default for its kind.
     MissingBaseUrl { endpoint: String },
-    /// An endpoint whose `base_url` passes `require_local` only by DNS (a
-    /// name that resolves to private addresses) rather than by its
-    /// spelling: it can be contacted, but its models count as cloud. Use an
-    /// IP address or a `.local`/`.lan` name to make them local.
+    /// An endpoint whose `base_url` name resolves only to local addresses
+    /// but isn't recognisably local by its spelling, with no `locality`
+    /// override: its models count as cloud. Set `locality = "local"` on the
+    /// endpoint to use them.
     NonLocalAddress { endpoint: String, host: String },
-    /// A `locality = "local"` override that has no effect, because an
-    /// override can only lower trust: on the endpoint itself (`model` is
-    /// `None`; its address isn't local by [`url_locality`]), or on a roster
-    /// entry for a model on a cloud-class endpoint.
+    /// A `locality = "local"` override that has no effect: on the endpoint
+    /// itself (`model` is `None`) because its address isn't local by
+    /// [`url_locality`] and [`RoutingConfig::verify_local`] didn't pass (or
+    /// wasn't called); or on a roster entry for a model on a cloud-class
+    /// endpoint (a roster override can only lower trust).
     LocalOverrideIgnored {
         endpoint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,8 +140,8 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::NonLocalAddress { endpoint, host } => write!(
                 f,
                 "endpoint `{endpoint}` points at `{host}`, which resolves to local addresses but \
-                 isn't recognised as a local name, so its models count as cloud; use its IP \
-                 address or a `.local`/`.lan` name"
+                 isn't recognised as a local name, so its models count as cloud; set \
+                 `locality = \"local\"` on the endpoint to use them"
             ),
             ConfigIssue::NotLocal { endpoint, reason } => {
                 write!(f, "endpoint `{endpoint}`: {reason}")
@@ -145,10 +151,10 @@ impl fmt::Display for ConfigIssue {
                 model: None,
             } => write!(
                 f,
-                "endpoint `{endpoint}`: `locality = \"local\"` has no effect, because an override \
-                 can only lower trust and its address isn't local; a name that resolves only to \
-                 private addresses passes `require_local`'s DNS rule, but to count as local give \
-                 it an IP address or a `.local`/`.lan` name"
+                "endpoint `{endpoint}`: `locality = \"local\"` has no effect: its address isn't \
+                 local and wasn't verified. A name counts as local when `require_local`'s DNS \
+                 rule passes (it resolves only to local addresses) and `verify_local` ran at \
+                 load"
             ),
             ConfigIssue::LocalOverrideIgnored {
                 endpoint,
@@ -181,12 +187,50 @@ impl RoutingConfig {
     /// first, then other endpoints' (in name order), then roster issues (in
     /// roster order).
     ///
-    /// **May do DNS lookups**: each endpoint URL is checked with
+    /// **May do blocking DNS lookups**: each endpoint URL is checked with
     /// [`require_local`](crate::require_local) (system resolver), which
-    /// resolves a host name that isn't recognisably local. Use
-    /// [`validate_with`](Self::validate_with) to supply the resolver.
+    /// resolves a host name that isn't recognisably local. Inside an async
+    /// runtime call it from `spawn_blocking`, or use
+    /// [`validate_with`](Self::validate_with) with your own resolver.
     pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
         self.validate_with(default, &SystemResolver)
+    }
+
+    /// Load-time pass: for each endpoint (and the default) with
+    /// `locality = "local"` whose address isn't local by spelling, run
+    /// `require_local`; on success set `dns_local` so the override is
+    /// honoured, on failure report [`ConfigIssue::NotLocal`] (fatal).
+    /// **Products must call this at load**, before using
+    /// `effective_locality`; an unverified config fails closed. It may do
+    /// blocking DNS lookups: inside an async runtime use `spawn_blocking`.
+    pub fn verify_local(
+        &mut self,
+        default: &mut DefaultEndpoint,
+        r: &dyn Resolve,
+    ) -> Vec<ConfigIssue> {
+        let mut issues = Vec::new();
+        let mut one = |name: &str, url: Option<&str>, locality, flag: &mut bool| {
+            *flag = false;
+            let Some(url) = url.filter(|u| {
+                locality == Some(Locality::Local) && url_locality(u) == Locality::Cloud
+            }) else {
+                return;
+            };
+            match require_local_with(url, r) {
+                Ok(()) => *flag = true,
+                Err(e) => issues.push(ConfigIssue::NotLocal {
+                    endpoint: name.to_owned(),
+                    reason: e.to_string(),
+                }),
+            }
+        };
+        let url = default.base_url().map(str::to_owned);
+        one(default.name.as_str(), url.as_deref(), default.locality, &mut default.dns_local);
+        for (name, c) in &mut self.endpoints {
+            let url = c.base_url().map(str::to_owned);
+            one(name, url.as_deref(), c.locality, &mut c.dns_local);
+        }
+        issues
     }
 
     /// [`validate`](Self::validate) with an explicit resolver.
@@ -196,11 +240,12 @@ impl RoutingConfig {
             default.name.as_str(),
             default.base_url(),
             default.locality,
+            default.dns_local,
             r,
             &mut issues,
         );
         for (name, c) in &self.endpoints {
-            endpoint_issues(name, c.base_url(), c.locality, r, &mut issues);
+            endpoint_issues(name, c.base_url(), c.locality, c.dns_local, r, &mut issues);
         }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
@@ -237,6 +282,7 @@ fn endpoint_issues(
     name: &str,
     base_url: Option<&str>,
     locality: Option<Locality>,
+    dns_local: bool,
     r: &dyn Resolve,
     issues: &mut Vec<ConfigIssue>,
 ) {
@@ -260,7 +306,7 @@ fn endpoint_issues(
         }
         Ok(()) => {}
     }
-    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud {
+    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud && !dns_local {
         issues.push(ConfigIssue::LocalOverrideIgnored {
             endpoint: name.to_owned(),
             model: None,
@@ -268,15 +314,25 @@ fn endpoint_issues(
     }
 }
 
-/// The one locality rule for an endpoint, default or configured: an
-/// explicit `locality = "cloud"` is `Cloud`; otherwise the URL host decides
-/// ([`url_locality`]); no URL is `Cloud` (fail closed). A
-/// `locality = "local"` override never raises trust: it changes nothing.
-fn effective_locality(base_url: Option<&str>, locality: Option<Locality>) -> Locality {
+/// The one locality rule for an endpoint, default or configured, in order:
+/// `locality = "cloud"` is `Cloud`; a local address ([`url_locality`]) is
+/// `Local`; `locality = "local"` with `dns_local` (verified by
+/// [`RoutingConfig::verify_local`]) is `Local`; anything else, including no
+/// URL or an unverified override, is `Cloud` (fail closed).
+fn effective_locality(
+    base_url: Option<&str>,
+    locality: Option<Locality>,
+    dns_local: bool,
+) -> Locality {
     if locality == Some(Locality::Cloud) {
         return Locality::Cloud;
     }
-    base_url.map_or(Locality::Cloud, url_locality)
+    if base_url.is_some_and(|u| url_locality(u) == Locality::Local)
+        || (locality == Some(Locality::Local) && dns_local)
+    {
+        return Locality::Local;
+    }
+    Locality::Cloud
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -322,15 +378,19 @@ pub struct EndpointConfig {
     pub kind: EndpointKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Operator override of the locality the address implies. It can only
-    /// lower trust: `cloud` marks the endpoint cloud; `local` never makes a
-    /// non-local address local (it is accepted but has no effect, and
-    /// [`RoutingConfig::validate`] reports it). A LAN box with a DNS name
-    /// passes [`require_local`](crate::require_local) by resolving to
-    /// private addresses; to count as local, address it by IP or a
-    /// `.local`/`.lan` name.
+    /// Operator override of the locality the address implies: `cloud` marks
+    /// the endpoint cloud. `local` is honoured only for a LAN box with a DNS
+    /// name, and only after [`RoutingConfig::verify_local`] confirmed that
+    /// [`require_local`](crate::require_local) passes (it resolves only to
+    /// local addresses); otherwise it has no effect and
+    /// [`RoutingConfig::validate`] reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
+    /// Set by [`RoutingConfig::verify_local`]: the `locality = "local"`
+    /// override was honoured because `require_local` passed. Never from
+    /// TOML; `false` fails closed.
+    #[serde(skip)]
+    pub dns_local: bool,
 }
 
 impl EndpointConfig {
@@ -342,9 +402,10 @@ impl EndpointConfig {
     /// Whether requests to this endpoint leave the machine's network.
     /// `locality = "cloud"` is `Cloud`; otherwise the
     /// [`base_url`](Self::base_url) host decides ([`url_locality`]); no URL
-    /// at all is `Cloud` (fail closed). A `local` override changes nothing.
+    /// at all is `Cloud` (fail closed). See [`effective_locality`] for the
+    /// order; a `local` override counts only once verified.
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.base_url(), self.locality)
+        effective_locality(self.base_url(), self.locality, self.dns_local)
     }
 }
 
@@ -518,6 +579,7 @@ summarize = { tier = "small" }
             kind: EndpointKind::Ollama,
             base_url: None,
             locality: None,
+            dns_local: false,
         }
     }
 
@@ -744,12 +806,71 @@ base_url = "http://nonexistent.example.com"
             ]
         );
         let text: Vec<String> = issues.iter().map(ToString::to_string).collect();
-        assert!(text[0].contains("`.local`/`.lan`"), "{}", text[0]);
+        assert!(text[0].contains("set `locality = \"local\"`"), "{}", text[0]);
         assert!(
             text[5].contains("no effect") && text[5].contains("`require_local`'s DNS rule"),
             "{}",
             text[5]
         );
+    }
+
+    #[test]
+    fn verify_local_honours_a_local_override_only_after_the_guard_passes() {
+        let src = |host: &str, locality: &str| {
+            toml::from_str::<Doc>(&format!(
+                "[routing.endpoints.box]\nkind = \"ollama\"\nbase_url = \"http://{host}:11434\"\n{locality}"
+            ))
+            .unwrap()
+            .routing
+        };
+        let over = "locality = \"local\"";
+        // Override + DNS name resolving to the LAN: Local after verify.
+        let mut c = src("lan-box.example.com", over);
+        let mut d = local_default();
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud); // unverified
+        assert_eq!(
+            c.validate_with(&d, &stub()),
+            vec![ConfigIssue::LocalOverrideIgnored {
+                endpoint: "box".into(),
+                model: None
+            }]
+        );
+        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert!(c.endpoints["box"].dns_local);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Local);
+        assert_eq!(
+            c.endpoint_locality(&d, "box"),
+            Some(Locality::Local)
+        );
+        assert_eq!(c.validate_with(&d, &stub()), vec![]);
+        // No override: Cloud, with the hint.
+        let mut c = src("lan-box.example.com", "");
+        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        assert!(matches!(
+            c.validate_with(&d, &stub()).as_slice(),
+            [ConfigIssue::NonLocalAddress { .. }]
+        ));
+        // Override, but the name resolves public: NotLocal, stays Cloud.
+        let mut c = src("pub.example.com", over);
+        let issues = c.verify_local(&mut d, &stub());
+        assert!(matches!(issues.as_slice(), [ConfigIssue::NotLocal { endpoint, .. }] if endpoint == "box"));
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        // A cloud override wins over everything.
+        let mut c = src("127.0.0.1", "locality = \"cloud\"");
+        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        // The default endpoint is verified too, and dns_local never reaches TOML.
+        let mut c = RoutingConfig::default();
+        let mut d = default_at(
+            EndpointKind::Ollama,
+            Some("http://lan-box.example.com:11434"),
+            Some(Locality::Local),
+        );
+        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(d.effective_locality(), Locality::Local);
+        let c = src("lan-box.example.com", over);
+        assert!(!toml::to_string(&c.endpoints["box"]).unwrap().contains("dns_local"));
     }
 
     #[test]
@@ -815,6 +936,7 @@ locality = "local"
             kind: EndpointKind::OpenaiCompat,
             base_url: Some("http://127.0.0.1:9".into()),
             locality: Some(Locality::Cloud),
+            dns_local: false,
         };
         let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
             .unwrap()

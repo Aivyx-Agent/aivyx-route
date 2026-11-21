@@ -230,6 +230,7 @@ mod tests {
             kind: EndpointKind::Ollama,
             base_url: None,
             locality: None,
+            dns_local: false,
         }
     }
 
@@ -377,6 +378,7 @@ mod tests {
             kind: EndpointKind::OpenaiCompat,
             base_url: None,
             locality: None,
+            dns_local: false,
         };
         let reports = [reached("main", vec![found("m:latest", &[], None)])];
         let ps = merge(&config_with(vec![entry("m")]), &default, &reports);
@@ -517,6 +519,7 @@ mod tests {
                 kind: EndpointKind::OpenaiCompat,
                 base_url: Some("http://127.0.0.1:9".into()),
                 locality: Some(Locality::Cloud),
+                dns_local: false,
             },
         );
         let mut claude = entry("claude-sonnet-5");
@@ -828,6 +831,7 @@ base_url = "https://api.groq.com/openai/v1"
             kind: EndpointKind::OpenaiCompat,
             base_url: None,
             locality: Some(Locality::Cloud),
+            dns_local: false,
         };
         let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
         let ps = merge(&config, &default, &[]);
@@ -841,6 +845,7 @@ base_url = "https://api.groq.com/openai/v1"
             kind: EndpointKind::OpenaiCompat,
             base_url: None,
             locality: Some(Locality::Cloud),
+            dns_local: false,
         };
         let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
         let p = find(&ps, "claude-sonnet-5");

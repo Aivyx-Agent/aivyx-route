@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use serde::de::DeserializeOwned;
-use tokio::time::{Instant, timeout_at};
+use tokio::time::{Instant, timeout, timeout_at};
 
 /// The `reqwest` this crate is built against. Consumers on a different
 /// reqwest major should still build the client with [`client`], not
@@ -196,13 +196,17 @@ async fn probe(
             "no base_url configured for endpoint `{endpoint}`"
         )),
         Some(base) => {
+            // Forced cloud: skipped without any lookup.
+            if config.locality == Some(Locality::Cloud) {
+                return DiscoveryOutcome::NotProbed;
+            }
             // Local-only: never contact an endpoint that fails the guard.
             if let Err(e) = ensure_local(base).await {
                 return DiscoveryOutcome::Unreachable(e);
             }
-            // Whatever its kind, an endpoint the crate calls cloud (a
-            // `locality = "cloud"` override, or a name only DNS knows is
-            // local) is never contacted.
+            // Whatever its kind, an endpoint the crate calls cloud (a name
+            // only DNS knows is local, with no verified override) is never
+            // contacted.
             if config.effective_locality() == Locality::Cloud {
                 return DiscoveryOutcome::NotProbed;
             }
@@ -220,6 +224,16 @@ async fn probe(
         }
     }
 }
+
+/// [`ensure_local`] bounded by [`GUARD_TIMEOUT`]; a timeout is a failure.
+pub(crate) async fn ensure_local_bounded(url: &str) -> Result<(), String> {
+    timeout(GUARD_TIMEOUT, ensure_local(url))
+        .await
+        .unwrap_or_else(|_| Err(format!("local check of {url} timed out")))
+}
+
+/// How long a poll waits on one endpoint's local check.
+const GUARD_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// [`require_local`](crate::require_local) for `url`, off the async
 /// threads: the system resolver blocks on a DNS name. The error is the
@@ -280,6 +294,7 @@ mod tests {
             kind,
             base_url: base_url.map(str::to_string),
             locality: None,
+            dns_local: false,
         }
     }
 

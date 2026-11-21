@@ -53,7 +53,7 @@ pub async fn collect(
             continue;
         };
         // Local-only: never poll an endpoint that fails the guard.
-        if super::ensure_local(base).await.is_err() {
+        if super::ensure_local_bounded(base).await.is_err() {
             continue;
         }
         let base = base.trim_end_matches('/');
@@ -79,7 +79,9 @@ pub async fn collect(
             }
         }
     }
+    // The broker is contacted only when it passes the guard too.
     if let Some(broker) = broker
+        && super::ensure_local_bounded(&broker.base_url).await.is_ok()
         && let Ok(report) = broker_report(&broker.base_url, client).await
     {
         // A single loaded model is a single-model server: whatever the
@@ -390,6 +392,7 @@ mod tests {
             kind,
             base_url: Some(base.to_string()),
             locality: None,
+            dns_local: false,
         }
     }
 
@@ -976,6 +979,24 @@ mod tests {
         );
     }
 
+    /// A broker at a non-local address is never contacted. The skip is not
+    /// observable from the snapshot alone (a failed request is also empty),
+    /// so this checks the gate that precedes the request and that a poll
+    /// with such a broker returns promptly and empty.
+    #[tokio::test]
+    async fn a_broker_at_a_public_address_is_skipped_by_the_guard() {
+        for url in ["http://203.0.113.7:1", "https://api.groq.com"] {
+            let err = crate::discovery::ensure_local_bounded(url).await.unwrap_err();
+            assert!(err.contains("is not local"), "{url}: {err}");
+            let broker = BrokerSource {
+                endpoint: EndpointRef::new("backend"),
+                base_url: url.to_string(),
+            };
+            let snap = collect(&[], Some(&broker), None, &reqwest::Client::new()).await;
+            assert_eq!(snap, ResidencySnapshot::default());
+        }
+    }
+
     #[tokio::test]
     async fn unreachable_sources_contribute_nothing() {
         let broker = BrokerSource {
@@ -1002,6 +1023,7 @@ mod tests {
                         kind: EndpointKind::Ollama,
                         base_url: Some("https://api.groq.com".into()),
                         locality: None,
+                        dns_local: false,
                     },
                 ),
             ],

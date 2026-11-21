@@ -44,8 +44,8 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/locality.rs` — `url_locality()`: Local vs Cloud from an endpoint URL's host as the `url` crate (WHATWG, like reqwest) parses it; no DNS; `EndpointConfig::effective_locality()` builds on it.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.
 - `src/classifier.rs` — optional small-model classifier prompt/parse.
-- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O. Concurrent, deadline-bounded, 8 MiB body cap, no redirects; never contacts an endpoint whose `effective_locality()` is Cloud.
+- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O. Concurrent, deadline-bounded, 8 MiB body cap, no redirects; never contacts an endpoint whose `effective_locality()` is Cloud or that fails `require_local`.
 
 Models are identified by `ModelKey` (endpoint, id), never by id alone.
 
-Everything outside `src/discovery/` must stay I/O-free and synchronous.
+Everything outside `src/discovery/` must stay I/O-free and synchronous, with one exception: `src/guard.rs` (`require_local`) and the config functions built on it (`RoutingConfig::validate`, `verify_local`) may do blocking DNS lookups. In an async runtime call them from `spawn_blocking` or use the `_with` forms with your own `Resolve`. Products must call `verify_local` at load.

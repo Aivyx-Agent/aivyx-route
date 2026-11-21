@@ -95,6 +95,7 @@ context_window = 200000
             kind: EndpointKind::Ollama,
             base_url: None,
             locality: None,
+            dns_local: false,
         },
         &reports,
     );
@@ -182,6 +183,7 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
             kind: EndpointKind::OpenaiCompat,
             base_url: Some(server.uri()),
             locality: None,
+            dns_local: false,
         },
         &reports,
     );
@@ -201,6 +203,7 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
             kind: EndpointKind::OpenaiCompat,
             base_url: Some(server.uri()),
             locality: None,
+            dns_local: false,
         },
         &reports,
     );

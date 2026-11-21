@@ -106,11 +106,12 @@ its kind:
   a single name written with a trailing dot (`ai.`) is fully qualified, so
   cloud. An endpoint with no address, a non-`http(s)` scheme, or a URL
   that doesn't parse is cloud too.
-- An endpoint's `locality` override can only lower trust: `"cloud"` forces
-  cloud; `"local"` never makes a non-local address local (it is accepted,
-  does nothing, and `validate` reports it). A LAN box with a DNS name passes
-  `require_local` by resolving to private addresses, but its models count as
-  local only if you address it by IP or a `.local`/`.lan` name.
+- An endpoint's `locality = "cloud"` forces cloud. `"local"` is honoured
+  only after verification (below), else it does nothing and `validate`
+  reports it. A LAN box with a DNS name passes
+  `require_local` by resolving to private addresses; set `locality = "local"`
+  on it and call `RoutingConfig::verify_local` at load (it verifies the
+  guard passes) to count its models as local. Unverified, it stays cloud.
 - A roster entry's `locality = "cloud"` marks that one model cloud. Its
   `locality = "local"` never makes a model on a cloud endpoint local: it is
   ignored and reported.
