@@ -93,7 +93,7 @@ pub fn require_local(url: &str) -> Result<(), NotLocal> {
 /// [`require_local`] with an explicit resolver.
 pub fn require_local_with(url: &str, r: &dyn Resolve) -> Result<(), NotLocal> {
     let fail = |url: String, reason| Err(NotLocal { url, reason });
-    let Some(parsed) = parse_http_url(url).filter(|_| !is_other_scheme(url)) else {
+    let Some(parsed) = parse_http_url(url) else {
         return fail(strip_credentials(url), NotLocalReason::NotHttp);
     };
     let shown = {
@@ -135,16 +135,6 @@ fn check_ip(shown: String, ip: IpAddr) -> Result<(), NotLocal> {
             url: shown,
             reason: NotLocalReason::PublicAddress(ip),
         })
-    }
-}
-
-/// `unix:/x` style: a non-http scheme with a hierarchical part. The shared
-/// parser would read it as `http://unix:/x`; `host:port` (opaque) stays
-/// accepted.
-fn is_other_scheme(url: &str) -> bool {
-    match Url::parse(url.trim()) {
-        Ok(u) => !matches!(u.scheme(), "http" | "https") && !u.cannot_be_a_base(),
-        Err(_) => false,
     }
 }
 

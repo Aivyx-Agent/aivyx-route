@@ -6,6 +6,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::guard::{Resolve, SystemResolver, require_local_with};
 use crate::locality::{url_host, url_locality};
 use crate::profile::{CapabilitySet, EndpointRef, Locality, Strength, Tier};
 use crate::requirements::TaskOverrides;
@@ -73,12 +74,12 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.kind, self.base_url(), self.locality)
+        effective_locality(self.base_url(), self.locality)
     }
 }
 
-/// A problem [`RoutingConfig::validate`] found. None is fatal; products
-/// should warn at startup.
+/// A problem [`RoutingConfig::validate`] found. Every issue is a warning
+/// except [`ConfigIssue::NotLocal`], which products treat as fatal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "issue", rename_all = "snake_case")]
 pub enum ConfigIssue {
@@ -89,17 +90,28 @@ pub enum ConfigIssue {
     DuplicateModel { endpoint: String, model: String },
     /// A local endpoint with no `base_url` and no default for its kind.
     MissingBaseUrl { endpoint: String },
-    /// A non-cloud-kind endpoint whose `base_url` host is not a local
-    /// address, with no explicit `locality`: its models count as cloud.
+    /// An endpoint whose `base_url` passes `require_local` only by DNS (a
+    /// name that resolves to private addresses) rather than by its
+    /// spelling: it can be contacted, but its models count as cloud. Use an
+    /// IP address or a `.local`/`.lan` name to make them local.
     NonLocalAddress { endpoint: String, host: String },
-    /// A `locality = "local"` override on something cloud, which is
-    /// ignored: on the endpoint itself (`model` is `None`), or on a roster
-    /// entry for a model on a cloud endpoint.
+    /// A `locality = "local"` override that has no effect, because an
+    /// override can only lower trust: on the endpoint itself (`model` is
+    /// `None`; its address isn't local by [`url_locality`]), or on a roster
+    /// entry for a model on a cloud-class endpoint.
     LocalOverrideIgnored {
         endpoint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
+    /// An endpoint (or the product's default backend) whose `base_url`
+    /// fails [`require_local`](crate::require_local): a cloud host, a
+    /// public address, a name that doesn't resolve, or a non-`http(s)` URL.
+    /// `reason` is the `NotLocal` error text.
+    ///
+    /// **Products treat this issue as fatal**: aivyx is local-only and
+    /// must not talk to such an endpoint.
+    NotLocal { endpoint: String, reason: String },
 }
 
 impl fmt::Display for ConfigIssue {
@@ -121,16 +133,22 @@ impl fmt::Display for ConfigIssue {
             ),
             ConfigIssue::NonLocalAddress { endpoint, host } => write!(
                 f,
-                "endpoint `{endpoint}` points at `{host}`, which is not a local address, so its \
-                 models count as cloud; if it is on your own network, set `locality = \"local\"` \
-                 on the endpoint"
+                "endpoint `{endpoint}` points at `{host}`, which resolves to local addresses but \
+                 isn't recognised as a local name, so its models count as cloud; use its IP \
+                 address or a `.local`/`.lan` name"
             ),
+            ConfigIssue::NotLocal { endpoint, reason } => {
+                write!(f, "endpoint `{endpoint}`: {reason}")
+            }
             ConfigIssue::LocalOverrideIgnored {
                 endpoint,
                 model: None,
             } => write!(
                 f,
-                "endpoint `{endpoint}` is a cloud endpoint; its `locality = \"local\"` is ignored"
+                "endpoint `{endpoint}`: `locality = \"local\"` has no effect, because an override \
+                 can only lower trust and its address isn't local; a name that resolves only to \
+                 private addresses passes `require_local`'s DNS rule, but to count as local give \
+                 it an IP address or a `.local`/`.lan` name"
             ),
             ConfigIssue::LocalOverrideIgnored {
                 endpoint,
@@ -159,20 +177,30 @@ impl RoutingConfig {
         }
     }
 
-    /// Report configuration mistakes. Pure; the default endpoint's issues
-    /// come first, then other endpoints' (in name order), then roster
-    /// issues (in roster order).
+    /// Report configuration mistakes; the default endpoint's issues come
+    /// first, then other endpoints' (in name order), then roster issues (in
+    /// roster order).
+    ///
+    /// **May do DNS lookups**: each endpoint URL is checked with
+    /// [`require_local`](crate::require_local) (system resolver), which
+    /// resolves a host name that isn't recognisably local. Use
+    /// [`validate_with`](Self::validate_with) to supply the resolver.
     pub fn validate(&self, default: &DefaultEndpoint) -> Vec<ConfigIssue> {
+        self.validate_with(default, &SystemResolver)
+    }
+
+    /// [`validate`](Self::validate) with an explicit resolver.
+    pub fn validate_with(&self, default: &DefaultEndpoint, r: &dyn Resolve) -> Vec<ConfigIssue> {
         let mut issues = Vec::new();
         endpoint_issues(
             default.name.as_str(),
-            default.kind,
             default.base_url(),
             default.locality,
+            r,
             &mut issues,
         );
         for (name, c) in &self.endpoints {
-            endpoint_issues(name, c.kind, c.base_url(), c.locality, &mut issues);
+            endpoint_issues(name, c.base_url(), c.locality, r, &mut issues);
         }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
@@ -207,25 +235,32 @@ impl RoutingConfig {
 /// Locality issues and a missing URL for one endpoint.
 fn endpoint_issues(
     name: &str,
-    kind: EndpointKind,
     base_url: Option<&str>,
     locality: Option<Locality>,
+    r: &dyn Resolve,
     issues: &mut Vec<ConfigIssue>,
 ) {
-    let cloud_kind = kind.locality() == Locality::Cloud;
-    match base_url {
-        None if !cloud_kind => issues.push(ConfigIssue::MissingBaseUrl {
+    let Some(url) = base_url else {
+        issues.push(ConfigIssue::MissingBaseUrl {
             endpoint: name.to_owned(),
+        });
+        return;
+    };
+    let by_spelling = url_locality(url);
+    match require_local_with(url, r) {
+        Err(e) => issues.push(ConfigIssue::NotLocal {
+            endpoint: name.to_owned(),
+            reason: e.to_string(),
         }),
-        Some(url) if !cloud_kind && locality.is_none() && url_locality(url) == Locality::Cloud => {
+        Ok(()) if by_spelling == Locality::Cloud && locality.is_none() => {
             issues.push(ConfigIssue::NonLocalAddress {
                 endpoint: name.to_owned(),
                 host: url_host(url).unwrap_or_else(|| url.to_owned()),
             });
         }
-        _ => {}
+        Ok(()) => {}
     }
-    if cloud_kind && locality == Some(Locality::Local) {
+    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud {
         issues.push(ConfigIssue::LocalOverrideIgnored {
             endpoint: name.to_owned(),
             model: None,
@@ -233,21 +268,15 @@ fn endpoint_issues(
     }
 }
 
-/// The one locality rule for an endpoint, default or configured: cloud
-/// kinds are `Cloud`; otherwise an explicit `locality` wins, else the URL
-/// host decides ([`url_locality`]); no URL is `Cloud` (fail closed).
-fn effective_locality(
-    kind: EndpointKind,
-    base_url: Option<&str>,
-    locality: Option<Locality>,
-) -> Locality {
-    if kind.locality() == Locality::Cloud {
+/// The one locality rule for an endpoint, default or configured: an
+/// explicit `locality = "cloud"` is `Cloud`; otherwise the URL host decides
+/// ([`url_locality`]); no URL is `Cloud` (fail closed). A
+/// `locality = "local"` override never raises trust: it changes nothing.
+fn effective_locality(base_url: Option<&str>, locality: Option<Locality>) -> Locality {
+    if locality == Some(Locality::Cloud) {
         return Locality::Cloud;
     }
-    match locality {
-        Some(locality) => locality,
-        None => base_url.map_or(Locality::Cloud, url_locality),
-    }
+    base_url.map_or(Locality::Cloud, url_locality)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -261,17 +290,15 @@ pub enum EndpointKind {
     OpenaiCompat,
     /// Lemonade Server: single-LLM-at-a-time, with its own residency API.
     Lemonade,
-    Anthropic,
-    Openai,
 }
 
 impl EndpointKind {
-    /// The kind's own locality: `Cloud` for hosted APIs. A non-cloud kind
-    /// can still point at a hosted server, so decisions about where
-    /// requests go use [`EndpointConfig::effective_locality`] instead.
+    /// The kind's own locality: always `Local` (the hosted-API kinds were
+    /// removed in 0.2.0). A kind can still point at a hosted server, so
+    /// decisions about where requests go use
+    /// [`EndpointConfig::effective_locality`] instead.
     pub fn locality(self) -> Locality {
         match self {
-            EndpointKind::Anthropic | EndpointKind::Openai => Locality::Cloud,
             EndpointKind::Ollama
             | EndpointKind::LlamaRouter
             | EndpointKind::OpenaiCompat
@@ -284,7 +311,7 @@ impl EndpointKind {
             EndpointKind::Ollama => Some("http://localhost:11434"),
             EndpointKind::LlamaRouter => Some("http://localhost:8080"),
             EndpointKind::Lemonade => Some("http://127.0.0.1:13305/api"),
-            EndpointKind::OpenaiCompat | EndpointKind::Anthropic | EndpointKind::Openai => None,
+            EndpointKind::OpenaiCompat => None,
         }
     }
 }
@@ -295,10 +322,13 @@ pub struct EndpointConfig {
     pub kind: EndpointKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Operator override of the locality the address implies: `local`
-    /// marks a non-cloud kind local even when its host looks public (a LAN
-    /// box with a public DNS name); `cloud` marks it cloud. Never makes a
-    /// cloud kind local.
+    /// Operator override of the locality the address implies. It can only
+    /// lower trust: `cloud` marks the endpoint cloud; `local` never makes a
+    /// non-local address local (it is accepted but has no effect, and
+    /// [`RoutingConfig::validate`] reports it). A LAN box with a DNS name
+    /// passes [`require_local`](crate::require_local) by resolving to
+    /// private addresses; to count as local, address it by IP or a
+    /// `.local`/`.lan` name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
 }
@@ -310,11 +340,11 @@ impl EndpointConfig {
     }
 
     /// Whether requests to this endpoint leave the machine's network.
-    /// Cloud kinds are always `Cloud`. Otherwise an explicit `locality`
-    /// wins, else the [`base_url`](Self::base_url) host decides
-    /// ([`url_locality`]); no URL at all is `Cloud` (fail closed).
+    /// `locality = "cloud"` is `Cloud`; otherwise the
+    /// [`base_url`](Self::base_url) host decides ([`url_locality`]); no URL
+    /// at all is `Cloud` (fail closed). A `local` override changes nothing.
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.kind, self.base_url(), self.locality)
+        effective_locality(self.base_url(), self.locality)
     }
 }
 
@@ -443,8 +473,6 @@ summarize = { tier = "small" }
 
     #[test]
     fn endpoint_kinds_know_locality_and_default_urls() {
-        assert_eq!(EndpointKind::Anthropic.locality(), Locality::Cloud);
-        assert_eq!(EndpointKind::Openai.locality(), Locality::Cloud);
         assert_eq!(EndpointKind::Ollama.locality(), Locality::Local);
         assert_eq!(EndpointKind::OpenaiCompat.locality(), Locality::Local);
         assert_eq!(
@@ -596,20 +624,27 @@ endpoint = "gpu"
     }
 
     #[test]
-    fn an_explicit_endpoint_locality_marks_a_public_name_local_but_never_a_cloud_kind() {
-        let lan = endpoint(
+    fn an_endpoint_locality_override_can_only_lower_trust() {
+        let public = endpoint(
             "kind = \"ollama\"\nbase_url = \"http://gpu.example.com:11434\"\nlocality = \"local\"",
         );
-        assert_eq!(lan.effective_locality(), Locality::Local);
+        assert_eq!(public.effective_locality(), Locality::Cloud);
         let forced = endpoint(
             "kind = \"ollama\"\nbase_url = \"http://localhost:11434\"\nlocality = \"cloud\"",
         );
         assert_eq!(forced.effective_locality(), Locality::Cloud);
+        // `local` on a local address is a no-op.
+        let same = endpoint(
+            "kind = \"ollama\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\"",
+        );
+        assert_eq!(same.effective_locality(), Locality::Local);
+    }
+
+    #[test]
+    fn removed_cloud_kinds_fail_to_parse() {
         for kind in ["anthropic", "openai"] {
-            let ep = endpoint(&format!(
-                "kind = \"{kind}\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\""
-            ));
-            assert_eq!(ep.effective_locality(), Locality::Cloud, "{kind}");
+            let err = toml::from_str::<EndpointConfig>(&format!("kind = \"{kind}\"")).unwrap_err();
+            assert!(err.to_string().contains("unknown variant"), "{kind}: {err}");
         }
     }
 
@@ -621,50 +656,99 @@ endpoint = "gpu"
         );
     }
 
+    /// Resolves only what it is told; anything else fails (no network).
+    struct Stub(Vec<(&'static str, &'static str)>);
+
+    impl Resolve for Stub {
+        fn resolve(&self, host: &str, _port: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+            self.0
+                .iter()
+                .find(|(h, _)| *h == host)
+                .map(|(_, ip)| vec![ip.parse().unwrap()])
+                .ok_or_else(|| std::io::Error::other("no such host"))
+        }
+    }
+
+    fn stub() -> Stub {
+        Stub(vec![
+            ("lan-box.example.com", "192.168.1.20"),
+            ("pub.example.com", "203.0.113.7"),
+        ])
+    }
+
     #[test]
     fn validate_explains_locality_surprises() {
         let c = toml::from_str::<Doc>(
             r#"
-[routing.endpoints.claude]
-kind = "anthropic"
-locality = "local"
-
 [routing.endpoints.groq]
 kind = "openai_compat"
 base_url = "https://api.groq.com/openai/v1"
 
 [routing.endpoints.lan]
 kind = "ollama"
-base_url = "http://gpu.example.com:11434"
+base_url = "http://pub.example.com:11434"
 locality = "local"
+
+[routing.endpoints.dns-lan]
+kind = "ollama"
+base_url = "http://lan-box.example.com:11434"
 
 [routing.endpoints.home]
 kind = "ollama"
 base_url = "http://192.168.1.20:11434"
+
+[routing.endpoints.ftp]
+kind = "ollama"
+base_url = "ftp://127.0.0.1"
+
+[routing.endpoints.gone]
+kind = "ollama"
+base_url = "http://nonexistent.example.com"
 "#,
         )
         .unwrap()
         .routing;
-        let issues = c.validate(&local_default());
+        let issues = c.validate_with(&local_default(), &stub());
+        let not_local = |endpoint: &str, why: &str| ConfigIssue::NotLocal {
+            endpoint: endpoint.into(),
+            reason: why.into(),
+        };
         assert_eq!(
             issues,
             vec![
-                ConfigIssue::LocalOverrideIgnored {
-                    endpoint: "claude".into(),
-                    model: None
-                },
+                // BTreeMap order: dns-lan, ftp, gone, groq, home, lan.
                 ConfigIssue::NonLocalAddress {
-                    endpoint: "groq".into(),
-                    host: "api.groq.com".into()
+                    endpoint: "dns-lan".into(),
+                    host: "lan-box.example.com".into()
+                },
+                not_local(
+                    "ftp",
+                    "ftp://127.0.0.1/ is not local (not an http(s) URL) — aivyx is local-only; point it at a model server on this machine or your own network"
+                ),
+                not_local(
+                    "gone",
+                    "http://nonexistent.example.com/ is not local (doesn't resolve) — aivyx is local-only; point it at a model server on this machine or your own network"
+                ),
+                not_local(
+                    "groq",
+                    "https://api.groq.com/openai/v1 is not local (cloud host) — aivyx is local-only; point it at a model server on this machine or your own network"
+                ),
+                not_local(
+                    "lan",
+                    "http://pub.example.com:11434/ is not local (resolves to a public address 203.0.113.7) — aivyx is local-only; point it at a model server on this machine or your own network"
+                ),
+                ConfigIssue::LocalOverrideIgnored {
+                    endpoint: "lan".into(),
+                    model: None
                 },
             ]
         );
         let text: Vec<String> = issues.iter().map(ToString::to_string).collect();
-        assert!(text[0].contains("cloud endpoint"), "{}", text[0]);
+        assert!(text[0].contains("`.local`/`.lan`"), "{}", text[0]);
         assert!(
-            text[1].contains("`api.groq.com`") && text[1].contains("locality = \"local\""),
+            text[5].contains("no effect") && text[5].contains("`require_local`'s DNS rule"),
             "{}",
-            text[1]
+            text[5]
         );
     }
 
@@ -673,11 +757,13 @@ base_url = "http://192.168.1.20:11434"
         let c = toml::from_str::<Doc>(
             r#"
 [routing.endpoints.claude]
-kind = "anthropic"
+kind = "openai_compat"
+base_url = "http://127.0.0.1:9"
+locality = "cloud"
 
 [routing.endpoints.groq]
 kind = "openai_compat"
-base_url = "https://api.groq.com/openai/v1"
+base_url = "http://127.0.0.1:9"
 locality = "cloud"
 
 [[routing.models]]
@@ -702,7 +788,7 @@ locality = "local"
         )
         .unwrap()
         .routing;
-        let issues = c.validate(&local_default());
+        let issues = c.validate_with(&local_default(), &stub());
         assert_eq!(
             issues,
             vec![
@@ -726,15 +812,15 @@ locality = "local"
         );
         let cloud_default = DefaultEndpoint {
             name: EndpointRef::new("main"),
-            kind: EndpointKind::Anthropic,
-            base_url: None,
-            locality: None,
+            kind: EndpointKind::OpenaiCompat,
+            base_url: Some("http://127.0.0.1:9".into()),
+            locality: Some(Locality::Cloud),
         };
         let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
             .unwrap()
             .routing;
         assert_eq!(
-            c.validate(&cloud_default),
+            c.validate_with(&cloud_default, &stub()),
             vec![ConfigIssue::LocalOverrideIgnored {
                 endpoint: "main".into(),
                 model: Some("x".into())
@@ -778,14 +864,15 @@ locality = "local"
             (Ollama, None, None, Local),
             // No address at all fails closed.
             (OpenaiCompat, None, None, Cloud),
+            // An override can only lower trust.
             (
                 Ollama,
                 Some("http://gpu.example.com:11434"),
                 Some(Local),
-                Local,
+                Cloud,
             ),
             (Ollama, Some("http://localhost:11434"), Some(Cloud), Cloud),
-            (Anthropic, Some("http://127.0.0.1:9"), Some(Local), Cloud),
+            (Ollama, Some("http://127.0.0.1:9"), Some(Local), Local),
         ] {
             let d = default_at(kind, url, locality);
             assert_eq!(
@@ -808,34 +895,36 @@ locality = "local"
             Some("https://api.groq.com/openai/v1"),
             None,
         );
-        assert_eq!(
-            c.validate(&hosted),
-            vec![ConfigIssue::NonLocalAddress {
-                endpoint: "main".into(),
-                host: "api.groq.com".into()
-            }]
-        );
+        assert!(matches!(
+            c.validate_with(&hosted, &stub()).as_slice(),
+            [ConfigIssue::NotLocal { endpoint, reason }]
+                if endpoint == "main" && reason.contains("cloud host")
+        ));
         let lan = default_at(
             EndpointKind::OpenaiCompat,
             Some("http://10.0.0.2:8080"),
             None,
         );
-        assert_eq!(c.validate(&lan), vec![]);
+        assert_eq!(c.validate_with(&lan, &stub()), vec![]);
         let nowhere = default_at(EndpointKind::OpenaiCompat, None, None);
         assert_eq!(
-            c.validate(&nowhere),
+            c.validate_with(&nowhere, &stub()),
             vec![ConfigIssue::MissingBaseUrl {
                 endpoint: "main".into()
             }]
         );
-        let claude = default_at(EndpointKind::Anthropic, None, Some(Locality::Local));
-        assert_eq!(
-            c.validate(&claude),
-            vec![ConfigIssue::LocalOverrideIgnored {
-                endpoint: "main".into(),
-                model: None
-            }]
+        let ignored = default_at(
+            EndpointKind::Ollama,
+            Some("http://203.0.113.7:11434"),
+            Some(Locality::Local),
         );
+        assert!(matches!(
+            c.validate_with(&ignored, &stub()).as_slice(),
+            [
+                ConfigIssue::NotLocal { .. },
+                ConfigIssue::LocalOverrideIgnored { model: None, .. }
+            ]
+        ));
     }
 
     #[test]

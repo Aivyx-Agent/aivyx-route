@@ -8,6 +8,14 @@ Task-aware model routing shared by `aivyx-pa` and `aivyx-coder`. Given the
 models you have (auto-discovered and/or declared) and what a request needs,
 it picks one deterministically and says why.
 
+**Local-only:** the cloud endpoint kinds (`anthropic`, `openai`) were removed
+in 0.2.0; a config naming them fails to parse. `require_local(url)` is the
+guard: a URL is local when `url_locality` says so, or when its host name
+resolves (system resolver) to addresses that are all loopback, private,
+link-local, CGNAT or unspecified. `RoutingConfig::validate` reports
+`ConfigIssue::NotLocal` for any endpoint that fails it (products treat it as
+fatal, and it may do DNS lookups); discovery and residency never contact one.
+
 ## How it decides
 
 1. **Hard needs filter.** Vision, tool calling, audio, embeddings, minimum
@@ -49,7 +57,7 @@ enabled = true            # false or absent ⇒ today's single-model behavior
 discover = true
 
 [routing.endpoints.ollama-main]
-kind = "ollama"           # ollama | llama_router | openai_compat | lemonade | anthropic | openai
+kind = "ollama"           # ollama | llama_router | openai_compat | lemonade
 base_url = "http://localhost:11434"
 
 [[routing.models]]
@@ -86,8 +94,7 @@ picks cloud models when the product allows it. An endpoint's locality
 (`EndpointConfig::effective_locality()`) comes from its address, not just
 its kind:
 
-- `anthropic` and `openai` endpoints are always cloud.
-- Any other kind is local only when its `base_url` host is local: an IP in
+- An endpoint is local only when its `base_url` host is local: an IP in
   a loopback, private (`10/8`, `172.16/12`, `192.168/16`, `fc00::/7`),
   link-local (`169.254/16`, `fe80::/10`) or CGNAT/Tailscale
   (`100.64.0.0/10`) range, or a hostname that is `localhost`, has no dots,
@@ -99,19 +106,14 @@ its kind:
   a single name written with a trailing dot (`ai.`) is fully qualified, so
   cloud. An endpoint with no address, a non-`http(s)` scheme, or a URL
   that doesn't parse is cloud too.
-- `locality = "local"` on the endpoint marks a box on your network with a
-  public-looking DNS name local; `locality = "cloud"` forces cloud. Neither
-  makes a cloud kind local.
+- An endpoint's `locality` override can only lower trust: `"cloud"` forces
+  cloud; `"local"` never makes a non-local address local (it is accepted,
+  does nothing, and `validate` reports it). A LAN box with a DNS name passes
+  `require_local` by resolving to private addresses, but its models count as
+  local only if you address it by IP or a `.local`/`.lan` name.
 - A roster entry's `locality = "cloud"` marks that one model cloud. Its
   `locality = "local"` never makes a model on a cloud endpoint local: it is
   ignored and reported.
-
-```toml
-[routing.endpoints.gpu]
-kind = "ollama"
-base_url = "http://gpu.example.com:11434"
-locality = "local"
-```
 
 The product's default backend (`DefaultEndpoint`) follows the same rule:
 the product passes its kind, its `base_url` (else the kind's default) and
@@ -122,8 +124,8 @@ as cloud and unavailable, so they are never selected.
 
 `RoutingConfig::validate(&default)` reports unknown endpoints, duplicate
 models, local endpoints (the default included) with no `base_url`,
-non-cloud endpoints whose
-address makes them cloud, and ignored `locality = "local"` overrides;
+endpoints that fail
+`require_local` (`NotLocal`, fatal), and ignored `locality = "local"` overrides;
 products warn at startup.
 
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
@@ -132,9 +134,9 @@ OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded
 models only; its `labels` map to capabilities — `reasoning` marks a
 thinking model, but an unlabelled one may still think, so thinking is
 otherwise unknown, as is audio; the base is `.../api`, and a trailing
-`/v1` is tolerated). Cloud endpoints — by kind, by address, or marked
-`locality = "cloud"` (see *Local or cloud*) — are never contacted:
-discovery reports them `NotProbed` and residency skips them. Endpoints are
+`/v1` is tolerated). An endpoint that fails `require_local` is never contacted (discovery
+reports it `Unreachable` with the `NotLocal` text, residency skips it), and
+one marked `locality = "cloud"` is `NotProbed` (see *Local or cloud*). Endpoints are
 probed concurrently, Ollama's `/api/show` calls 8 at a time, and the whole
 run stops at a deadline (15 s; `discover_all_within` / `discover_within`
 take another, and fall back to 15 s for one too large to represent): whatever was found by then is returned, a model whose

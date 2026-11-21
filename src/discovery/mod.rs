@@ -190,34 +190,45 @@ async fn probe(
     client: &reqwest::Client,
     deadline: Instant,
 ) -> DiscoveryOutcome {
-    match config.kind {
-        EndpointKind::Anthropic | EndpointKind::Openai => DiscoveryOutcome::NotProbed,
-        kind => match config.base_url() {
-            None => DiscoveryOutcome::Unreachable(format!(
-                "no base_url configured for endpoint `{endpoint}`"
-            )),
+    let kind = config.kind;
+    match config.base_url() {
+        None => DiscoveryOutcome::Unreachable(format!(
+            "no base_url configured for endpoint `{endpoint}`"
+        )),
+        Some(base) => {
+            // Local-only: never contact an endpoint that fails the guard.
+            if let Err(e) = ensure_local(base).await {
+                return DiscoveryOutcome::Unreachable(e);
+            }
             // Whatever its kind, an endpoint the crate calls cloud (a
-            // hosted address, or `locality = "cloud"`) is never contacted.
-            Some(_) if config.effective_locality() == Locality::Cloud => {
-                DiscoveryOutcome::NotProbed
+            // `locality = "cloud"` override, or a name only DNS knows is
+            // local) is never contacted.
+            if config.effective_locality() == Locality::Cloud {
+                return DiscoveryOutcome::NotProbed;
             }
-            Some(base) => {
-                let base = base.trim_end_matches('/');
-                let result = match kind {
-                    EndpointKind::Ollama => ollama::discover(base, client, deadline).await,
-                    EndpointKind::LlamaRouter => {
-                        llama_router::discover(base, client, deadline).await
-                    }
-                    EndpointKind::Lemonade => lemonade::discover(base, client, deadline).await,
-                    _ => openai_compat::discover(base, client, deadline).await,
-                };
-                match result {
-                    Ok(models) => DiscoveryOutcome::Reached(models),
-                    Err(e) => DiscoveryOutcome::Unreachable(e.to_string()),
-                }
+            let base = base.trim_end_matches('/');
+            let result = match kind {
+                EndpointKind::Ollama => ollama::discover(base, client, deadline).await,
+                EndpointKind::LlamaRouter => llama_router::discover(base, client, deadline).await,
+                EndpointKind::Lemonade => lemonade::discover(base, client, deadline).await,
+                EndpointKind::OpenaiCompat => openai_compat::discover(base, client, deadline).await,
+            };
+            match result {
+                Ok(models) => DiscoveryOutcome::Reached(models),
+                Err(e) => DiscoveryOutcome::Unreachable(e.to_string()),
             }
-        },
+        }
     }
+}
+
+/// [`require_local`](crate::require_local) for `url`, off the async
+/// threads: the system resolver blocks on a DNS name. The error is the
+/// `NotLocal` text.
+pub(crate) async fn ensure_local(url: &str) -> Result<(), String> {
+    let url = url.to_owned();
+    tokio::task::spawn_blocking(move || crate::guard::require_local(&url).map_err(|e| e.to_string()))
+        .await
+        .unwrap_or_else(|e| Err(format!("local check failed: {e}")))
 }
 
 /// Probe every `[routing.endpoints]` entry concurrently, within
@@ -272,17 +283,30 @@ mod tests {
         }
     }
 
+    /// The local-only guard runs before any request: hosted kinds of
+    /// address are skipped with the `NotLocal` error.
     #[tokio::test]
-    async fn cloud_endpoints_are_never_probed() {
+    async fn non_local_endpoints_are_skipped_with_an_error() {
         let client = reqwest::Client::new();
-        for kind in [EndpointKind::Anthropic, EndpointKind::Openai] {
-            let r = discover(
-                &EndpointRef::new("cloud"),
-                &cfg(kind, Some("http://127.0.0.1:9")),
-                &client,
-            )
-            .await;
-            assert_eq!(r.outcome, DiscoveryOutcome::NotProbed);
+        for kind in [
+            EndpointKind::OpenaiCompat,
+            EndpointKind::Ollama,
+            EndpointKind::LlamaRouter,
+            EndpointKind::Lemonade,
+        ] {
+            for (url, why) in [
+                ("https://api.groq.com/openai/v1", "cloud host"),
+                ("http://203.0.113.7:9", "public address 203.0.113.7"),
+                ("ftp://127.0.0.1", "not an http(s) URL"),
+            ] {
+                let r = discover(&EndpointRef::new("hosted"), &cfg(kind, Some(url)), &client).await;
+                match r.outcome {
+                    DiscoveryOutcome::Unreachable(m) => {
+                        assert!(m.contains("is not local") && m.contains(why), "{kind:?} {url}: {m}");
+                    }
+                    other => panic!("{kind:?} {url}: {other:?}"),
+                }
+            }
         }
     }
 
@@ -296,21 +320,6 @@ mod tests {
         let r = discover(&EndpointRef::new("forced"), &forced, &client).await;
         assert_eq!(r.outcome, DiscoveryOutcome::NotProbed);
         assert!(server.received_requests().await.unwrap().is_empty());
-        // A public address (TEST-NET-3) on a local kind.
-        for kind in [
-            EndpointKind::OpenaiCompat,
-            EndpointKind::Ollama,
-            EndpointKind::LlamaRouter,
-            EndpointKind::Lemonade,
-        ] {
-            let r = discover(
-                &EndpointRef::new("hosted"),
-                &cfg(kind, Some("http://203.0.113.7:9")),
-                &client,
-            )
-            .await;
-            assert_eq!(r.outcome, DiscoveryOutcome::NotProbed, "{kind:?}");
-        }
     }
 
     #[tokio::test]
@@ -380,9 +389,9 @@ mod tests {
             .mount(&server)
             .await;
         let mut config = RoutingConfig::default();
-        config
-            .endpoints
-            .insert("z-cloud".into(), cfg(EndpointKind::Anthropic, None));
+        let mut forced = cfg(EndpointKind::OpenaiCompat, Some(&server.uri()));
+        forced.locality = Some(Locality::Cloud);
+        config.endpoints.insert("z-cloud".into(), forced);
         config.endpoints.insert(
             "a-local".into(),
             cfg(EndpointKind::OpenaiCompat, Some(&server.uri())),

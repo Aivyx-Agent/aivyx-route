@@ -514,9 +514,9 @@ mod tests {
         config.endpoints.insert(
             "anthropic".into(),
             EndpointConfig {
-                kind: EndpointKind::Anthropic,
-                base_url: None,
-                locality: None,
+                kind: EndpointKind::OpenaiCompat,
+                base_url: Some("http://127.0.0.1:9".into()),
+                locality: Some(Locality::Cloud),
             },
         );
         let mut claude = entry("claude-sonnet-5");
@@ -543,6 +543,7 @@ base_url = "https://api.groq.com/openai/v1"
 [endpoints.lan]
 kind = "ollama"
 base_url = "http://gpu.example.com:11434"
+# An override can only lower trust: this stays cloud.
 locality = "local"
 
 [endpoints.home]
@@ -565,7 +566,7 @@ base_url = "http://192.168.1.20:8080"
         let ps = merge(&config, &local_default("main"), &reports);
         assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
         assert_eq!(find(&ps, "kimi").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "qwen3:8b").locality, Locality::Local);
+        assert_eq!(find(&ps, "qwen3:8b").locality, Locality::Cloud);
         assert_eq!(find(&ps, "gemma").locality, Locality::Local);
 
         let groq_only = merge(&config, &local_default("main"), &reports[..1]);
@@ -790,7 +791,9 @@ base_url = "http://192.168.1.20:8080"
         let mut config: RoutingConfig = toml::from_str(
             r#"
 [endpoints.claude]
-kind = "anthropic"
+kind = "openai_compat"
+base_url = "http://127.0.0.1:9"
+locality = "cloud"
 
 [endpoints.groq]
 kind = "openai_compat"
@@ -822,9 +825,9 @@ base_url = "https://api.groq.com/openai/v1"
         // A cloud default endpoint's models stay cloud too.
         let default = DefaultEndpoint {
             name: ep("main"),
-            kind: EndpointKind::Anthropic,
+            kind: EndpointKind::OpenaiCompat,
             base_url: None,
-            locality: None,
+            locality: Some(Locality::Cloud),
         };
         let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
         let ps = merge(&config, &default, &[]);
@@ -835,9 +838,9 @@ base_url = "https://api.groq.com/openai/v1"
     fn a_cloud_default_endpoint_makes_its_models_cloud() {
         let default = DefaultEndpoint {
             name: ep("anthropic"),
-            kind: EndpointKind::Anthropic,
+            kind: EndpointKind::OpenaiCompat,
             base_url: None,
-            locality: None,
+            locality: Some(Locality::Cloud),
         };
         let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
         let p = find(&ps, "claude-sonnet-5");

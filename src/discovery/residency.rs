@@ -52,14 +52,18 @@ pub async fn collect(
         let Some(base) = endpoint.base_url() else {
             continue;
         };
+        // Local-only: never poll an endpoint that fails the guard.
+        if super::ensure_local(base).await.is_err() {
+            continue;
+        }
         let base = base.trim_end_matches('/');
         let models = match endpoint.kind {
             EndpointKind::Ollama => ollama(base, client).await,
             EndpointKind::LlamaRouter => llama_router(base, client).await,
             EndpointKind::Lemonade => lemonade(base, client).await,
-            // Nothing to ask: single-model OpenAI-compatible servers and
-            // cloud endpoints report no residency.
-            EndpointKind::OpenaiCompat | EndpointKind::Anthropic | EndpointKind::Openai => {
+            // Nothing to ask: single-model OpenAI-compatible servers
+            // report no residency.
+            EndpointKind::OpenaiCompat => {
                 continue;
             }
         };
@@ -995,8 +999,8 @@ mod tests {
                 (
                     EndpointRef::new("cloud"),
                     EndpointConfig {
-                        kind: EndpointKind::Anthropic,
-                        base_url: None,
+                        kind: EndpointKind::Ollama,
+                        base_url: Some("https://api.groq.com".into()),
                         locality: None,
                     },
                 ),

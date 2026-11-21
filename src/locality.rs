@@ -56,6 +56,9 @@ pub(crate) fn parse_http_url(url: &str) -> Option<Url> {
     // string with no scheme of its own (`myhost:8080`) gets `http://`.
     let parsed = match Url::parse(url) {
         Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+        // `unix:/x`, `foo:/evil.com`: another scheme with a hierarchical
+        // part. Only opaque `host:port` (`localhost:8080`) is a bare host.
+        Ok(other) if !other.cannot_be_a_base() => return None,
         _ if url.contains("://") || has_http_scheme(url) => return None,
         _ => Url::parse(&format!("http://{url}")).ok()?,
     };
@@ -155,6 +158,8 @@ mod tests {
             "http://user:pw@myhost:8080",
             "http://2130706433",
             "myhost:8080",
+            "localhost:8080",
+            "localhost:8080/v1",
         ] {
             assert_eq!(url_locality(url), Locality::Local, "{url}");
         }
@@ -198,6 +203,9 @@ mod tests {
             "http://[2001:db8::1%25eth0]/",
             "http://evil.com%2F.lan/",
             "ftp://localhost",
+            "ftp://127.0.0.1",
+            "unix:/x",
+            "foo:/evil.com",
         ] {
             assert_eq!(url_locality(url), Locality::Cloud, "{url}");
         }

@@ -57,7 +57,9 @@ kind = "ollama"
 base_url = "{uri}"
 
 [routing.endpoints.anthropic]
-kind = "anthropic"
+kind = "openai_compat"
+base_url = "http://127.0.0.1:9"
+locality = "cloud"
 
 [[routing.models]]
 id = "qwen3-coder:30b"
