@@ -124,7 +124,10 @@ pub fn resolve_local_with(
         Ok(addrs) if addrs.is_empty() => fail(NotLocalReason::DoesNotResolve),
         Ok(addrs) => match addrs.iter().find(|ip| !ip_is_local(**ip)) {
             Some(ip) => fail(NotLocalReason::PublicAddress(*ip)),
-            None => Ok(addrs.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()),
+            None => Ok(addrs
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip, port))
+                .collect()),
         },
     }
 }
@@ -439,14 +442,29 @@ mod tests {
     #[test]
     fn resolve_local_with_checks_every_address() {
         let mut stub = Stub::default();
-        stub.map.insert("lan.example.com", Ok(vec!["10.0.0.5".parse().unwrap(), "192.168.1.2".parse().unwrap()]));
-        stub.map.insert("mixed.example.com", Ok(vec!["10.0.0.5".parse().unwrap(), "8.8.8.8".parse().unwrap()]));
+        stub.map.insert(
+            "lan.example.com",
+            Ok(vec![
+                "10.0.0.5".parse().unwrap(),
+                "192.168.1.2".parse().unwrap(),
+            ]),
+        );
+        stub.map.insert(
+            "mixed.example.com",
+            Ok(vec![
+                "10.0.0.5".parse().unwrap(),
+                "8.8.8.8".parse().unwrap(),
+            ]),
+        );
         stub.map.insert("empty.example.com", Ok(vec![]));
         let ok = resolve_local_with("lan.example.com", 8080, &stub).unwrap();
         assert_eq!(ok.len(), 2);
         assert!(ok.iter().all(|a| a.port() == 8080));
         let e = resolve_local_with("mixed.example.com", 80, &stub).unwrap_err();
-        assert_eq!(e.reason, NotLocalReason::PublicAddress("8.8.8.8".parse().unwrap()));
+        assert_eq!(
+            e.reason,
+            NotLocalReason::PublicAddress("8.8.8.8".parse().unwrap())
+        );
         assert_eq!(e.url, "mixed.example.com:80");
         for h in ["empty.example.com", "unknown.example.com"] {
             let e = resolve_local_with(h, 80, &stub).unwrap_err();

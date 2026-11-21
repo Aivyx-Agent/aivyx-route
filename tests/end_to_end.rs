@@ -3,8 +3,8 @@
 
 use aivyx_route::discovery::discover_all;
 use aivyx_route::{
-    DefaultEndpoint, DiscoveryOutcome, EndpointKind, Policy, Requirements,
-    RoutingConfig, TaskKind, merge, select,
+    DefaultEndpoint, DiscoveryOutcome, EndpointKind, Policy, Requirements, RoutingConfig, TaskKind,
+    merge, select,
 };
 use serde::Deserialize;
 use serde_json::json;

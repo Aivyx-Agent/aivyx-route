@@ -986,7 +986,9 @@ mod tests {
     #[tokio::test]
     async fn a_broker_at_a_public_address_is_skipped_by_the_guard() {
         for url in ["http://203.0.113.7:1", "https://api.groq.com"] {
-            let err = crate::discovery::ensure_local_bounded(url).await.unwrap_err();
+            let err = crate::discovery::ensure_local_bounded(url)
+                .await
+                .unwrap_err();
             assert!(err.contains("is not local"), "{url}: {err}");
             let broker = BrokerSource {
                 endpoint: EndpointRef::new("backend"),

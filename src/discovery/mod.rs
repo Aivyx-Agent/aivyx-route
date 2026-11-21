@@ -244,9 +244,11 @@ const GUARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// `NotLocal` text.
 pub(crate) async fn ensure_local(url: &str) -> Result<(), String> {
     let url = url.to_owned();
-    tokio::task::spawn_blocking(move || crate::guard::require_local(&url).map_err(|e| e.to_string()))
-        .await
-        .unwrap_or_else(|e| Err(format!("local check failed: {e}")))
+    tokio::task::spawn_blocking(move || {
+        crate::guard::require_local(&url).map_err(|e| e.to_string())
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("local check failed: {e}")))
 }
 
 /// Probe every `[routing.endpoints]` entry concurrently, within
@@ -321,7 +323,10 @@ mod tests {
                 let r = discover(&EndpointRef::new("hosted"), &cfg(kind, Some(url)), &client).await;
                 match r.outcome {
                     DiscoveryOutcome::Unreachable(m) => {
-                        assert!(m.contains("is not local") && m.contains(why), "{kind:?} {url}: {m}");
+                        assert!(
+                            m.contains("is not local") && m.contains(why),
+                            "{kind:?} {url}: {m}"
+                        );
                     }
                     other => panic!("{kind:?} {url}: {other:?}"),
                 }

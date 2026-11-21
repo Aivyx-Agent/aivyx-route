@@ -305,7 +305,12 @@ impl RoutingConfig {
             }
         };
         let url = default.base_url().map(str::to_owned);
-        one(default.name.as_str(), url.as_deref(), default.locality, &mut default.dns_verified);
+        one(
+            default.name.as_str(),
+            url.as_deref(),
+            default.locality,
+            &mut default.dns_verified,
+        );
         for (name, c) in &mut self.endpoints {
             let url = c.base_url().map(str::to_owned);
             one(name, url.as_deref(), c.locality, &mut c.dns_verified);
@@ -328,7 +333,14 @@ impl RoutingConfig {
             );
         }
         for (name, c) in &self.endpoints {
-            endpoint_issues(name, c.base_url(), c.locality, c.dns_verified(), r, &mut issues);
+            endpoint_issues(
+                name,
+                c.base_url(),
+                c.locality,
+                c.dns_verified(),
+                r,
+                &mut issues,
+            );
         }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
@@ -805,9 +817,8 @@ endpoint = "gpu"
         );
         assert_eq!(forced.effective_locality(), Locality::Cloud);
         // `local` on a local address is a no-op.
-        let same = endpoint(
-            "kind = \"ollama\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\"",
-        );
+        let same =
+            endpoint("kind = \"ollama\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\"");
         assert_eq!(same.effective_locality(), Locality::Local);
     }
 
@@ -915,7 +926,11 @@ base_url = "http://nonexistent.example.com"
             ]
         );
         let text: Vec<String> = issues.iter().map(ToString::to_string).collect();
-        assert!(text[0].contains("set `locality = \"local\"`"), "{}", text[0]);
+        assert!(
+            text[0].contains("set `locality = \"local\"`"),
+            "{}",
+            text[0]
+        );
         assert!(
             text[5].contains("no effect") && text[5].contains("`require_local`'s DNS rule"),
             "{}",
@@ -947,10 +962,7 @@ base_url = "http://nonexistent.example.com"
         assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
         assert!(c.endpoints["box"].dns_verified());
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Local);
-        assert_eq!(
-            c.endpoint_locality(&d, "box"),
-            Some(Locality::Local)
-        );
+        assert_eq!(c.endpoint_locality(&d, "box"), Some(Locality::Local));
         assert_eq!(c.validate_with(&d, &stub()), vec![]);
         // No override: Cloud, with the hint.
         let mut c = src("lan-box.example.com", "");
@@ -963,7 +975,9 @@ base_url = "http://nonexistent.example.com"
         // Override, but the name resolves public: NotLocal, stays Cloud.
         let mut c = src("pub.example.com", over);
         let issues = c.verify_local_with(&mut d, &stub());
-        assert!(matches!(issues.as_slice(), [ConfigIssue::NotLocal { endpoint, .. }] if endpoint == "box"));
+        assert!(
+            matches!(issues.as_slice(), [ConfigIssue::NotLocal { endpoint, .. }] if endpoint == "box")
+        );
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
         // A cloud override wins over everything.
         let mut c = src("127.0.0.1", "locality = \"cloud\"");
@@ -979,7 +993,11 @@ base_url = "http://nonexistent.example.com"
         assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
         assert_eq!(d.effective_locality(), Locality::Local);
         let c = src("lan-box.example.com", over);
-        assert!(!toml::to_string(&c.endpoints["box"]).unwrap().contains("dns_verified"));
+        assert!(
+            !toml::to_string(&c.endpoints["box"])
+                .unwrap()
+                .contains("dns_verified")
+        );
     }
 
     /// Resolver that fails the test if it is ever asked anything.
@@ -1022,7 +1040,9 @@ base_url = "http://nonexistent.example.com"
         assert_eq!(d2.effective_locality(), Locality::Local);
         // Trust can still be lowered; a URL makes it ordinary again.
         assert_eq!(
-            d.clone().with_locality(Locality::Cloud).effective_locality(),
+            d.clone()
+                .with_locality(Locality::Cloud)
+                .effective_locality(),
             Locality::Cloud
         );
         assert!(!d.with_base_url("https://api.groq.com").is_in_process());
@@ -1030,10 +1050,11 @@ base_url = "http://nonexistent.example.com"
 
     #[test]
     fn an_ordinary_endpoint_with_no_url_stays_cloud_even_with_a_local_override() {
-        let d = DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
-            .with_locality(Locality::Local);
+        let d =
+            DefaultEndpoint::new("main", EndpointKind::OpenaiCompat).with_locality(Locality::Local);
         assert_eq!(d.effective_locality(), Locality::Cloud);
-        let ep = EndpointConfig::new(EndpointKind::OpenaiCompat, None).with_locality(Locality::Local);
+        let ep =
+            EndpointConfig::new(EndpointKind::OpenaiCompat, None).with_locality(Locality::Local);
         assert_eq!(ep.effective_locality(), Locality::Cloud);
         let mut c = RoutingConfig::default();
         let mut d = d;
