@@ -231,6 +231,7 @@ mod tests {
             base_url: None,
             locality: None,
             dns_verified: Default::default(),
+            in_process: false,
         }
     }
 
@@ -379,6 +380,7 @@ mod tests {
             base_url: None,
             locality: None,
             dns_verified: Default::default(),
+            in_process: false,
         };
         let reports = [reached("main", vec![found("m:latest", &[], None)])];
         let ps = merge(&config_with(vec![entry("m")]), &default, &reports);
@@ -832,10 +834,27 @@ base_url = "https://api.groq.com/openai/v1"
             base_url: None,
             locality: Some(Locality::Cloud),
             dns_verified: Default::default(),
+            in_process: false,
         };
         let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
         let ps = merge(&config, &default, &[]);
         assert_eq!(find(&ps, "claude-haiku").locality, Locality::Cloud);
+    }
+
+    #[test]
+    fn an_in_process_default_endpoints_models_are_local() {
+        let default = DefaultEndpoint::in_process("mistralrs");
+        let ps = merge(&config_with(vec![entry("qwen")]), &default, &[]);
+        let p = find(&ps, "qwen");
+        assert_eq!(p.locality, Locality::Local);
+        assert_ne!(p.availability, Availability::Unavailable);
+        // And routing, with cloud off, can pick it.
+        use crate::requirements::{Requirements, TaskKind, TaskOverrides};
+        use crate::select::{Policy, select};
+        let req = Requirements::builder()
+            .task(&TaskKind::Chat, &TaskOverrides::default())
+            .build();
+        assert!(select(&req, &ps, &Policy::default()).is_ok());
     }
 
     #[test]
@@ -846,6 +865,7 @@ base_url = "https://api.groq.com/openai/v1"
             base_url: None,
             locality: Some(Locality::Cloud),
             dns_verified: Default::default(),
+            in_process: false,
         };
         let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
         let p = find(&ps, "claude-sonnet-5");

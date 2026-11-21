@@ -57,6 +57,9 @@ pub struct DefaultEndpoint {
     /// The URL [`RoutingConfig::verify_local`] confirmed with
     /// `require_local`; never from config. Excluded from `==`.
     pub(crate) dns_verified: DnsVerified,
+    /// An in-process backend: no URL, local by construction. Only
+    /// [`DefaultEndpoint::in_process`] sets it.
+    pub(crate) in_process: bool,
 }
 
 /// The exact URL that passed `require_local` at load (see
@@ -94,13 +97,36 @@ impl DefaultEndpoint {
             base_url: None,
             locality: None,
             dns_verified: DnsVerified::default(),
+            in_process: false,
         }
     }
 
-    /// With `base_url` as its URL.
+    /// The product's in-process model backend (e.g. mistralrs): no URL,
+    /// nothing to contact, **`Local` by construction**. `validate`,
+    /// `verify_local` and discovery never look it up; routing selects its
+    /// models as local. This is the only way to get a URL-less local
+    /// endpoint: any ordinary endpoint with no URL (even with
+    /// `locality = "local"`) is still `Cloud`. A `locality = "cloud"`
+    /// override still applies; [`with_base_url`](Self::with_base_url) makes
+    /// it an ordinary endpoint again.
+    pub fn in_process(name: impl Into<String>) -> Self {
+        DefaultEndpoint {
+            in_process: true,
+            ..DefaultEndpoint::new(name, EndpointKind::OpenaiCompat)
+        }
+    }
+
+    /// Whether this is an [`in_process`](Self::in_process) backend.
+    pub fn is_in_process(&self) -> bool {
+        self.in_process
+    }
+
+    /// With `base_url` as its URL (which makes an in-process default an
+    /// ordinary endpoint).
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self.in_process = false;
         self
     }
 
@@ -123,6 +149,9 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
+        if self.in_process && self.locality != Some(Locality::Cloud) {
+            return Locality::Local;
+        }
         effective_locality(self.base_url(), self.locality, self.dns_verified())
     }
 }
@@ -287,14 +316,17 @@ impl RoutingConfig {
     /// [`validate`](Self::validate) with an explicit resolver.
     pub fn validate_with(&self, default: &DefaultEndpoint, r: &dyn Resolve) -> Vec<ConfigIssue> {
         let mut issues = Vec::new();
-        endpoint_issues(
-            default.name.as_str(),
-            default.base_url(),
-            default.locality,
-            default.dns_verified(),
-            r,
-            &mut issues,
-        );
+        // An in-process backend has no URL to check.
+        if !default.in_process {
+            endpoint_issues(
+                default.name.as_str(),
+                default.base_url(),
+                default.locality,
+                default.dns_verified(),
+                r,
+                &mut issues,
+            );
+        }
         for (name, c) in &self.endpoints {
             endpoint_issues(name, c.base_url(), c.locality, c.dns_verified(), r, &mut issues);
         }
@@ -656,6 +688,7 @@ summarize = { tier = "small" }
             base_url: None,
             locality: None,
             dns_verified: Default::default(),
+            in_process: false,
         }
     }
 
@@ -949,6 +982,49 @@ base_url = "http://nonexistent.example.com"
         assert!(!toml::to_string(&c.endpoints["box"]).unwrap().contains("dns_verified"));
     }
 
+    /// Resolver that fails the test if it is ever asked anything.
+    struct Forbidden;
+
+    impl Resolve for Forbidden {
+        fn resolve(&self, host: &str, _: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
+            panic!("looked up {host}")
+        }
+    }
+
+    #[test]
+    fn an_in_process_default_is_local_without_a_url_or_lookup() {
+        let d = DefaultEndpoint::in_process("mistralrs");
+        assert!(d.is_in_process());
+        assert_eq!(d.base_url(), None);
+        assert_eq!(d.effective_locality(), Locality::Local);
+        let mut c = RoutingConfig::default();
+        assert_eq!(c.endpoint_locality(&d, "mistralrs"), Some(Locality::Local));
+        // No MissingBaseUrl, no NotLocal, no lookup.
+        assert_eq!(c.validate_with(&d, &Forbidden), vec![]);
+        let mut d2 = d.clone();
+        assert_eq!(c.verify_local_with(&mut d2, &Forbidden), vec![]);
+        assert_eq!(d2.effective_locality(), Locality::Local);
+        // Trust can still be lowered; a URL makes it ordinary again.
+        assert_eq!(
+            d.clone().with_locality(Locality::Cloud).effective_locality(),
+            Locality::Cloud
+        );
+        assert!(!d.with_base_url("https://api.groq.com").is_in_process());
+    }
+
+    #[test]
+    fn an_ordinary_endpoint_with_no_url_stays_cloud_even_with_a_local_override() {
+        let d = DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
+            .with_locality(Locality::Local);
+        assert_eq!(d.effective_locality(), Locality::Cloud);
+        let ep = EndpointConfig::new(EndpointKind::OpenaiCompat, None).with_locality(Locality::Local);
+        assert_eq!(ep.effective_locality(), Locality::Cloud);
+        let mut c = RoutingConfig::default();
+        let mut d = d;
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
+        assert_eq!(d.effective_locality(), Locality::Cloud);
+    }
+
     #[test]
     fn verification_goes_stale_when_the_url_changes_and_is_not_compared() {
         let mut c = RoutingConfig::default();
@@ -1040,6 +1116,7 @@ locality = "local"
             base_url: Some("http://127.0.0.1:9".into()),
             locality: Some(Locality::Cloud),
             dns_verified: Default::default(),
+            in_process: false,
         };
         let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
             .unwrap()

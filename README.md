@@ -117,6 +117,10 @@ its kind:
   `locality = "local"` never makes a model on a cloud endpoint local: it is
   ignored and reported.
 
+An in-process backend (mistralrs, no URL) is declared with
+`DefaultEndpoint::in_process(name)`: local by construction, never looked up or
+contacted, its models selected as local. Nothing else is local without a URL.
+
 The product's default backend (`DefaultEndpoint`) follows the same rule:
 the product passes its kind, its `base_url` (else the kind's default) and
 any `locality` override, so a remote default backend is cloud and one with

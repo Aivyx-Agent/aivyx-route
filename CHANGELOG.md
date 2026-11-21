@@ -32,6 +32,13 @@ Local-only. Breaking.
   .redirect(Policy::none())`; connections to a name can then only go to local
   addresses whatever DNS does after the check. reqwest does not call the
   resolver for IP-literal URLs, so keep using `require_local` too.
+- New `DefaultEndpoint::in_process(name)` (+ `is_in_process()`): the
+  product's in-process backend (mistralrs). No URL, `Local` by construction;
+  `validate`, `verify_local` and discovery never look it up or contact it
+  (discovery only walks `[routing.endpoints]`, never the default), and
+  routing selects its models as local. Not in TOML. No existing rule is
+  widened: an ordinary endpoint with no URL stays `Cloud`, even with
+  `locality = "local"`. Replaces placeholder-URL workarounds.
 - New `require_local` / `require_local_with` guard (`NotLocal`,
   `NotLocalReason`, `Resolve`, `SystemResolver`).
 - New `ConfigIssue::NotLocal`, which products treat as fatal. `validate` may
