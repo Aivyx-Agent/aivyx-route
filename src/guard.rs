@@ -112,6 +112,7 @@ pub fn require_local_with(url: &str, r: &dyn Resolve) -> Result<(), NotLocal> {
             if domain_is_local(domain) {
                 return Ok(());
             }
+            // http(s) always has a known default port, so this never falls back.
             let port = parsed.port_or_known_default().unwrap_or(80);
             match r.resolve(domain, port) {
                 Err(_) => fail(shown, NotLocalReason::DoesNotResolve),
@@ -147,7 +148,7 @@ fn is_other_scheme(url: &str) -> bool {
     }
 }
 
-/// The URL as given, minus any `user:pass@` (unparsable URLs show as given).
+/// The URL as given, minus any `user:pass@` (also when it doesn't parse).
 fn strip_credentials(url: &str) -> String {
     match Url::parse(url.trim()) {
         Ok(mut u) if u.has_host() => {
@@ -155,7 +156,20 @@ fn strip_credentials(url: &str) -> String {
             let _ = u.set_password(None);
             u.to_string()
         }
-        _ => url.to_string(),
+        _ => strip_userinfo_text(url),
+    }
+}
+
+/// Textual fallback: cut `userinfo@` from the authority, which runs from
+/// `://` (or the start) to the first `/`, `?` or `#`, at its last `@`.
+fn strip_userinfo_text(url: &str) -> String {
+    let start = url.find("://").map_or(0, |i| i + 3);
+    let end = url[start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| start + i);
+    match url[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &url[..start], &url[start + at + 1..]),
+        None => url.to_string(),
     }
 }
 
@@ -203,6 +217,8 @@ mod tests {
             "http://[::1]:8080/",
             "http://[fd00::1]/",
             "http://[fe80::1]/",
+            "http://[fc00::1]/",
+            "http://[::ffff:127.0.0.1]/",
             "http://[::]/",
         ] {
             assert!(require_local_with(u, &stub).is_ok(), "{u}");
@@ -309,5 +325,72 @@ mod tests {
             vec![ip("127.0.0.1")]
         );
         assert!(require_local("http://127.0.0.1:8090").is_ok());
+    }
+
+    #[test]
+    fn unparsable_urls_do_not_leak_credentials() {
+        let stub = Stub::default();
+        for u in [
+            "http://u:p@host:99999/",
+            "http://u:p@[zz]/",
+            "u:p@host:99999",
+        ] {
+            let e = require_local_with(u, &stub).unwrap_err();
+            assert_eq!(e.reason, NotLocalReason::NotHttp, "{u}");
+            let text = e.to_string();
+            assert!(!text.contains("u:p") && !text.contains("p@"), "{text}");
+        }
+    }
+
+    #[test]
+    fn bare_host_port_and_case() {
+        let mut stub = Stub::default();
+        assert_eq!(
+            reason("api.openai.com:443", &stub),
+            NotLocalReason::CloudHost
+        );
+        assert_eq!(
+            reason("HTTP://API.OPENAI.COM/", &stub),
+            NotLocalReason::CloudHost
+        );
+        assert_eq!(
+            reason("http://api.openai.com./", &stub),
+            NotLocalReason::CloudHost
+        );
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 0);
+        stub.map.insert("evil.com", Ok(vec![ip("1.2.3.4")]));
+        assert_eq!(
+            reason("evil.com:443", &stub),
+            NotLocalReason::PublicAddress(ip("1.2.3.4"))
+        );
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mapped_v4_follows_the_v4_rules() {
+        let stub = Stub::default();
+        assert_eq!(
+            reason("http://[::ffff:8.8.8.8]/", &stub),
+            NotLocalReason::PublicAddress(ip("::ffff:8.8.8.8"))
+        );
+        assert!(require_local_with("http://[::ffff:127.0.0.1]/", &stub).is_ok());
+    }
+
+    #[test]
+    fn display_text_for_cloud_and_unresolved() {
+        let stub = Stub::default();
+        let tail = " — aivyx is local-only; point it at a model server on this machine or your own network";
+        assert_eq!(
+            require_local_with("https://api.openai.com/v1", &stub)
+                .unwrap_err()
+                .to_string(),
+            format!("https://api.openai.com/v1 is not local (cloud host){tail}")
+        );
+        assert_eq!(
+            require_local_with("http://nope.example.com/", &stub)
+                .unwrap_err()
+                .to_string(),
+            format!("http://nope.example.com/ is not local (doesn't resolve){tail}")
+        );
     }
 }

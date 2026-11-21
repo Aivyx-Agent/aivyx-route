@@ -21,7 +21,9 @@ pub mod sessions;
 pub use config::{
     ConfigIssue, DefaultEndpoint, EndpointConfig, EndpointKind, RosterEntry, RoutingConfig,
 };
-pub use guard::{NotLocal, NotLocalReason, Resolve, SystemResolver, require_local, require_local_with};
+pub use guard::{
+    NotLocal, NotLocalReason, Resolve, SystemResolver, require_local, require_local_with,
+};
 pub use locality::url_locality;
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
