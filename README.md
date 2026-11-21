@@ -138,9 +138,19 @@ products warn at startup.
 the client connects. For that gap, `resolve_local(host, port)` returns the
 addresses only if all are local, and (feature `discovery`) `LocalOnlyDns` is
 a reqwest resolver doing the same at connect time. Build clients with
-`Client::builder().dns_resolver(Arc::new(LocalOnlyDns)).redirect(Policy::none())`
-(`discovery::client()` already does). reqwest skips the resolver for
-IP-literal URLs, so keep the `require_local` URL check as well.
+`Client::builder().dns_resolver(Arc::new(LocalOnlyDns)).redirect(Policy::none()).no_proxy()`
+(`discovery::client()` already does). `.no_proxy()` matters: reqwest
+otherwise honours `HTTP_PROXY`/`ALL_PROXY`, and an IP-literal proxy bypasses
+both guards. reqwest skips the resolver for IP-literal URLs, so keep the
+`require_local` URL check as well. Names that are local by spelling (`.lan`,
+`.local`, single-label, `localhost`) pass `require_local` without a lookup,
+so the per-request check does not protect them; only the connect-time
+`LocalOnlyDns` resolver does (e.g. a single-label `gpu` expanded by a search
+domain to a public host).
+
+With `locality = "local"` guidance: a LAN name that resolves to a private
+IPv4 and also a global IPv6 (SLAAC) address is refused; use an IP literal or
+a name with only local addresses.
 
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
 `/api/show`, llama-server router mode's `/models`, `/v1/models` on any

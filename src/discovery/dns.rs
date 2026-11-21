@@ -14,8 +14,19 @@ use crate::guard::resolve_local;
 /// let client = reqwest::Client::builder()
 ///     .dns_resolver(std::sync::Arc::new(aivyx_route::discovery::LocalOnlyDns))
 ///     .redirect(reqwest::redirect::Policy::none())
+///     .no_proxy()
 ///     .build()?;
 /// ```
+///
+/// `.no_proxy()` matters: reqwest otherwise sends requests to
+/// `HTTP_PROXY`/`ALL_PROXY`, and a proxy given as an IP literal bypasses
+/// both this resolver and the URL check.
+///
+/// Names that are local by spelling (`.lan`, `.local`, `.internal`,
+/// `.home.arpa`, single-label names, `localhost`) pass `require_local`
+/// without a lookup, so the per-request check does not protect them; only
+/// this connect-time resolver does (e.g. a single-label `gpu` expanded by a
+/// search domain to a public host).
 ///
 /// With such a client, connections to a host name can only ever go to local
 /// addresses, whatever DNS answers between an earlier `require_local` check

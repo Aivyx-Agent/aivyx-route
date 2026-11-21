@@ -118,7 +118,7 @@ impl DefaultEndpoint {
 
     /// Whether this is an [`in_process`](Self::in_process) backend.
     pub fn is_in_process(&self) -> bool {
-        self.in_process
+        self.in_process && self.base_url.is_none()
     }
 
     /// With `base_url` as its URL (which makes an in-process default an
@@ -149,7 +149,7 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
-        if self.in_process && self.locality != Some(Locality::Cloud) {
+        if self.is_in_process() && self.locality != Some(Locality::Cloud) {
             return Locality::Local;
         }
         effective_locality(self.base_url(), self.locality, self.dns_verified())
@@ -317,7 +317,7 @@ impl RoutingConfig {
     pub fn validate_with(&self, default: &DefaultEndpoint, r: &dyn Resolve) -> Vec<ConfigIssue> {
         let mut issues = Vec::new();
         // An in-process backend has no URL to check.
-        if !default.in_process {
+        if !default.is_in_process() {
             endpoint_issues(
                 default.name.as_str(),
                 default.base_url(),
@@ -989,6 +989,22 @@ base_url = "http://nonexistent.example.com"
         fn resolve(&self, host: &str, _: u16) -> std::io::Result<Vec<std::net::IpAddr>> {
             panic!("looked up {host}")
         }
+    }
+
+    #[test]
+    fn in_process_with_a_public_base_url_set_directly_is_cloud_and_not_local() {
+        let mut d = DefaultEndpoint::in_process("mistralrs");
+        d.base_url = Some("https://8.8.8.8/v1".into());
+        assert!(!d.is_in_process());
+        assert_eq!(d.effective_locality(), Locality::Cloud);
+        let c = RoutingConfig::default();
+        let issues = c.validate_with(&d, &Forbidden);
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, ConfigIssue::NotLocal { .. })),
+            "{issues:?}"
+        );
     }
 
     #[test]

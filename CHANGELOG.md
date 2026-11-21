@@ -29,9 +29,14 @@ Local-only. Breaking.
   `reqwest::dns::Resolve` built on it (runs in `spawn_blocking`; the
   `NotLocal` is the error). `discovery::client()` installs it. Recommended
   client for products: `Client::builder().dns_resolver(Arc::new(LocalOnlyDns))
-  .redirect(Policy::none())`; connections to a name can then only go to local
+  .redirect(Policy::none()).no_proxy()`; connections to a name can then only go to local
   addresses whatever DNS does after the check. reqwest does not call the
   resolver for IP-literal URLs, so keep using `require_local` too.
+- An `in_process` default counts as in-process only while its `base_url` is
+  unset: setting the public `base_url` field directly makes it an ordinary
+  endpoint (`Cloud` unless local, checked by `validate`).
+- A bare path such as `/v1/chat` is no longer read as the host `v1`; it is
+  `NotHttp`.
 - New `DefaultEndpoint::in_process(name)` (+ `is_in_process()`): the
   product's in-process backend (mistralrs). No URL, `Local` by construction;
   `validate`, `verify_local` and discovery never look it up or contact it

@@ -60,6 +60,8 @@ pub(crate) fn parse_http_url(url: &str) -> Option<Url> {
         // part. Only opaque `host:port` (`localhost:8080`) is a bare host.
         Ok(other) if !other.cannot_be_a_base() => return None,
         _ if url.contains("://") || has_http_scheme(url) => return None,
+        // `/v1/chat` is a path, not a host named `v1`.
+        _ if url.starts_with(['/', '\\']) => return None,
         _ => Url::parse(&format!("http://{url}")).ok()?,
     };
     if !matches!(parsed.scheme(), "http" | "https") {

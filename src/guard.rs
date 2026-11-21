@@ -377,6 +377,14 @@ mod tests {
     }
 
     #[test]
+    fn a_leading_slash_path_is_not_a_bare_host() {
+        let stub = Stub::default();
+        assert_eq!(reason("/v1/chat", &stub), NotLocalReason::NotHttp);
+        assert_eq!(reason("\\v1", &stub), NotLocalReason::NotHttp);
+        assert_eq!(reason(" /v1", &stub), NotLocalReason::NotHttp);
+    }
+
+    #[test]
     fn bare_host_port_and_case() {
         let mut stub = Stub::default();
         assert_eq!(
