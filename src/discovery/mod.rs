@@ -14,11 +14,14 @@
 //! cloud kinds, hosted addresses, `locality = "cloud"` — are never
 //! contacted: they report `NotProbed`, and residency skips them.
 
+mod dns;
 mod lemonade;
 mod llama_router;
 mod ollama;
 mod openai_compat;
 pub mod residency;
+
+pub use dns::LocalOnlyDns;
 
 use std::fmt;
 use std::time::Duration;
@@ -63,6 +66,7 @@ pub const MAX_BODY_BYTES: u64 = 8 << 20;
 /// X1).
 pub fn client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(LocalOnlyDns))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()

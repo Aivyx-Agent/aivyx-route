@@ -5,7 +5,7 @@
 //! least one address, every one of which is local under the same IP rules.
 
 use std::fmt;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use url::{Host, Url};
 
@@ -83,6 +83,50 @@ const CLOUD_HOSTS: &[&str] = &[
 fn is_cloud_host(domain: &str) -> bool {
     let domain = domain.strip_suffix('.').unwrap_or(domain);
     CLOUD_HOSTS.contains(&domain) || domain.ends_with(".openai.azure.com")
+}
+
+/// The addresses `host:port` connects to, `Ok` only when all of them are
+/// local (system resolver). The reqwest-independent core of the connect-time
+/// guard ([`LocalOnlyDns`](crate::discovery::LocalOnlyDns)).
+pub fn resolve_local(host: &str, port: u16) -> Result<Vec<SocketAddr>, NotLocal> {
+    resolve_local_with(host, port, &SystemResolver)
+}
+
+/// [`resolve_local`] with an explicit resolver. An IP-literal host (bracketed
+/// or not) is returned as-is when local; a known cloud host is refused without
+/// a lookup; any other name must resolve to at least one address, all local
+/// (even a `.lan`/`.local` name: what it connects to is what counts).
+/// `NotLocal.url` is `host:port`.
+pub fn resolve_local_with(
+    host: &str,
+    port: u16,
+    r: &dyn Resolve,
+) -> Result<Vec<SocketAddr>, NotLocal> {
+    let fail = |reason| {
+        Err(NotLocal {
+            url: format!("{host}:{port}"),
+            reason,
+        })
+    };
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<IpAddr>() {
+        return if ip_is_local(ip) {
+            Ok(vec![SocketAddr::new(ip, port)])
+        } else {
+            fail(NotLocalReason::PublicAddress(ip))
+        };
+    }
+    if is_cloud_host(&host.to_ascii_lowercase()) {
+        return fail(NotLocalReason::CloudHost);
+    }
+    match r.resolve(host, port) {
+        Err(_) => fail(NotLocalReason::DoesNotResolve),
+        Ok(addrs) if addrs.is_empty() => fail(NotLocalReason::DoesNotResolve),
+        Ok(addrs) => match addrs.iter().find(|ip| !ip_is_local(**ip)) {
+            Some(ip) => fail(NotLocalReason::PublicAddress(*ip)),
+            None => Ok(addrs.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()),
+        },
+    }
 }
 
 /// `Ok` when `url` is local, resolving domains through the system resolver.
@@ -382,5 +426,40 @@ mod tests {
                 .to_string(),
             format!("http://nope.example.com/ is not local (doesn't resolve){tail}")
         );
+    }
+
+    #[test]
+    fn resolve_local_with_checks_every_address() {
+        let mut stub = Stub::default();
+        stub.map.insert("lan.example.com", Ok(vec!["10.0.0.5".parse().unwrap(), "192.168.1.2".parse().unwrap()]));
+        stub.map.insert("mixed.example.com", Ok(vec!["10.0.0.5".parse().unwrap(), "8.8.8.8".parse().unwrap()]));
+        stub.map.insert("empty.example.com", Ok(vec![]));
+        let ok = resolve_local_with("lan.example.com", 8080, &stub).unwrap();
+        assert_eq!(ok.len(), 2);
+        assert!(ok.iter().all(|a| a.port() == 8080));
+        let e = resolve_local_with("mixed.example.com", 80, &stub).unwrap_err();
+        assert_eq!(e.reason, NotLocalReason::PublicAddress("8.8.8.8".parse().unwrap()));
+        assert_eq!(e.url, "mixed.example.com:80");
+        for h in ["empty.example.com", "unknown.example.com"] {
+            let e = resolve_local_with(h, 80, &stub).unwrap_err();
+            assert_eq!(e.reason, NotLocalReason::DoesNotResolve, "{h}");
+        }
+    }
+
+    #[test]
+    fn resolve_local_with_cloud_hosts_and_literals_need_no_lookup() {
+        // A stub that knows nothing: any lookup would be DoesNotResolve.
+        let stub = Stub::default();
+        let e = resolve_local_with("api.openai.com", 443, &stub).unwrap_err();
+        assert_eq!(e.reason, NotLocalReason::CloudHost);
+        let ok = resolve_local_with("127.0.0.1", 1, &stub).unwrap();
+        assert_eq!(ok, vec!["127.0.0.1:1".parse().unwrap()]);
+        let ok = resolve_local_with("[::1]", 2, &stub).unwrap();
+        assert_eq!(ok, vec!["[::1]:2".parse().unwrap()]);
+        assert_eq!(
+            resolve_local_with("8.8.8.8", 1, &stub).unwrap_err().reason,
+            NotLocalReason::PublicAddress("8.8.8.8".parse().unwrap())
+        );
+        assert_eq!(stub.calls.load(Ordering::SeqCst), 0, "no lookups");
     }
 }

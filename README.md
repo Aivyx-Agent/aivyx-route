@@ -130,6 +130,14 @@ endpoints that fail
 `require_local` (`NotLocal`, fatal), and ignored `locality = "local"` overrides;
 products warn at startup.
 
+`require_local` checks a URL at one moment; DNS can answer differently when
+the client connects. For that gap, `resolve_local(host, port)` returns the
+addresses only if all are local, and (feature `discovery`) `LocalOnlyDns` is
+a reqwest resolver doing the same at connect time. Build clients with
+`Client::builder().dns_resolver(Arc::new(LocalOnlyDns)).redirect(Policy::none())`
+(`discovery::client()` already does). reqwest skips the resolver for
+IP-literal URLs, so keep the `require_local` URL check as well.
+
 Discovery (cargo feature `discovery`) reads Ollama's `/api/tags` +
 `/api/show`, llama-server router mode's `/models`, `/v1/models` on any
 OpenAI-compatible server, and Lemonade Server's `/v1/models` (downloaded

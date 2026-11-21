@@ -23,6 +23,15 @@ Local-only. Breaking.
   verified"; `NonLocalAddress` means "resolves all-local, no override: set
   `locality = \"local\"`". `verify_local` reports `NotLocal` (fatal) for an
   override whose URL fails the guard.
+- Connect-time resolver: `resolve_local` / `resolve_local_with(host, port)`
+  (reqwest-independent: all addresses must be local; cloud hosts refused
+  without a lookup) and, with the `discovery` feature, `LocalOnlyDns`, a
+  `reqwest::dns::Resolve` built on it (runs in `spawn_blocking`; the
+  `NotLocal` is the error). `discovery::client()` installs it. Recommended
+  client for products: `Client::builder().dns_resolver(Arc::new(LocalOnlyDns))
+  .redirect(Policy::none())`; connections to a name can then only go to local
+  addresses whatever DNS does after the check. reqwest does not call the
+  resolver for IP-literal URLs, so keep using `require_local` too.
 - New `require_local` / `require_local_with` guard (`NotLocal`,
   `NotLocalReason`, `Resolve`, `SystemResolver`).
 - New `ConfigIssue::NotLocal`, which products treat as fatal. `validate` may

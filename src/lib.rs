@@ -23,6 +23,7 @@ pub use config::{
 };
 pub use guard::{
     NotLocal, NotLocalReason, Resolve, SystemResolver, require_local, require_local_with,
+    resolve_local, resolve_local_with,
 };
 pub use locality::url_locality;
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
