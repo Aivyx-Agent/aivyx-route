@@ -3,7 +3,7 @@
 
 use aivyx_route::discovery::discover_all;
 use aivyx_route::{
-    DefaultEndpoint, DiscoveryOutcome, EndpointKind, EndpointRef, Policy, Requirements,
+    DefaultEndpoint, DiscoveryOutcome, EndpointKind, Policy, Requirements,
     RoutingConfig, TaskKind, merge, select,
 };
 use serde::Deserialize;
@@ -90,13 +90,7 @@ context_window = 200000
 
     let profiles = merge(
         &config,
-        &DefaultEndpoint {
-            name: EndpointRef::new("gpu"),
-            kind: EndpointKind::Ollama,
-            base_url: None,
-            locality: None,
-            dns_local: false,
-        },
+        &DefaultEndpoint::new("gpu", EndpointKind::Ollama),
         &reports,
     );
     assert_eq!(profiles.len(), 4);
@@ -178,13 +172,7 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
     let reports = discover_all(&config, &reqwest::Client::new()).await;
     let profiles = merge(
         &config,
-        &DefaultEndpoint {
-            name: EndpointRef::new("local"),
-            kind: EndpointKind::OpenaiCompat,
-            base_url: Some(server.uri()),
-            locality: None,
-            dns_local: false,
-        },
+        &DefaultEndpoint::new("local", EndpointKind::OpenaiCompat).with_base_url(server.uri()),
         &reports,
     );
     let d = select(&req, &profiles, &Policy::default()).unwrap();
@@ -198,13 +186,7 @@ async fn an_openai_compat_model_is_assumed_capable_until_the_roster_says_otherwi
     let config = toml::from_str::<Doc>(&toml_src(denied)).unwrap().routing;
     let profiles = merge(
         &config,
-        &DefaultEndpoint {
-            name: EndpointRef::new("local"),
-            kind: EndpointKind::OpenaiCompat,
-            base_url: Some(server.uri()),
-            locality: None,
-            dns_local: false,
-        },
+        &DefaultEndpoint::new("local", EndpointKind::OpenaiCompat).with_base_url(server.uri()),
         &reports,
     );
     assert!(select(&req, &profiles, &Policy::default()).is_err());

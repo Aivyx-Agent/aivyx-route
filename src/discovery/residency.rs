@@ -392,7 +392,7 @@ mod tests {
             kind,
             base_url: Some(base.to_string()),
             locality: None,
-            dns_local: false,
+            dns_verified: Default::default(),
         }
     }
 
@@ -1023,7 +1023,7 @@ mod tests {
                         kind: EndpointKind::Ollama,
                         base_url: Some("https://api.groq.com".into()),
                         locality: None,
-                        dns_local: false,
+                        dns_verified: Default::default(),
                     },
                 ),
             ],

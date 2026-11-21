@@ -9,9 +9,15 @@ Local-only. Breaking.
 - `locality = "local"` on an endpoint is honoured only for an address that
   isn't local by spelling and only after `RoutingConfig::verify_local`
   (products must call it at load) confirmed `require_local` passes for it;
-  that sets the new non-TOML `dns_local` field on `EndpointConfig` and
-  `DefaultEndpoint` (a new public field: struct literals need
-  `dns_local: false`). `effective_locality`: `cloud` override, else a local
+  that records the verified URL in a new private, non-TOML `dns_verified`
+  field on `EndpointConfig` and `DefaultEndpoint` (readable as
+  `dns_verified()`; changing `base_url` afterwards makes it stale, so it
+  fails closed; excluded from `==`). **Struct literals of `EndpointConfig` /
+  `DefaultEndpoint` no longer compile outside the crate (E0451)**: use the new
+  `EndpointConfig::new(kind, base_url)` + `.with_locality(..)` and
+  `DefaultEndpoint::new(name, kind)` + `.with_base_url(..)` /
+  `.with_locality(..)`. `verify_local(&mut default)` uses the system
+  resolver; `verify_local_with(&mut default, &dyn Resolve)` takes one. `effective_locality`: `cloud` override, else a local
   address, else verified `local` override, else Cloud (unverified fails
   closed). `LocalOverrideIgnored` (endpoint) now means "override set but not
   verified"; `NonLocalAddress` means "resolves all-local, no override: set
@@ -31,5 +37,3 @@ Local-only. Breaking.
   `spawn_blocking`).
 - `url_locality` is `Cloud` for any non-http(s) scheme with a hierarchical
   part (`unix:/x`, `foo:/evil.com`); `host:port` input is unchanged.
-- `ConfigIssue::NonLocalAddress` now means "passes `require_local` only by
-  DNS; its models count as cloud".

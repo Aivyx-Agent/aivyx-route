@@ -54,10 +54,35 @@ pub struct DefaultEndpoint {
     /// Operator override of the locality the address implies, as on an
     /// endpoint.
     pub locality: Option<Locality>,
-    /// Set by [`RoutingConfig::verify_local`]: the `locality = "local"`
-    /// override was honoured because `require_local` passed. Never from
-    /// config; `false` fails closed.
-    pub dns_local: bool,
+    /// The URL [`RoutingConfig::verify_local`] confirmed with
+    /// `require_local`; never from config. Excluded from `==`.
+    pub(crate) dns_verified: DnsVerified,
+}
+
+/// The exact URL that passed `require_local` at load (see
+/// [`RoutingConfig::verify_local`]), or none. A `locality = "local"`
+/// override is honoured only while it equals the current `base_url`, so
+/// changing the URL after verification fails closed.
+///
+/// Comparison is deliberately ignored: `PartialEq` is always `true`, so
+/// verification state (not config) never makes two configs unequal, and the
+/// config round-trip tests and products' "did the config change" checks
+/// compare configuration only.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DnsVerified(Option<String>);
+
+impl PartialEq for DnsVerified {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for DnsVerified {}
+
+impl DnsVerified {
+    fn matches(&self, base_url: Option<&str>) -> bool {
+        base_url.is_some() && self.0.as_deref() == base_url
+    }
 }
 
 impl DefaultEndpoint {
@@ -68,8 +93,27 @@ impl DefaultEndpoint {
             kind,
             base_url: None,
             locality: None,
-            dns_local: false,
+            dns_verified: DnsVerified::default(),
         }
+    }
+
+    /// With `base_url` as its URL.
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// With a `locality` override.
+    #[must_use]
+    pub fn with_locality(mut self, locality: Locality) -> Self {
+        self.locality = Some(locality);
+        self
+    }
+
+    /// Whether [`RoutingConfig::verify_local`] confirmed the current URL.
+    pub fn dns_verified(&self) -> bool {
+        self.dns_verified.matches(self.base_url())
     }
 
     /// The configured URL, else the kind's default.
@@ -79,7 +123,7 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.base_url(), self.locality, self.dns_local)
+        effective_locality(self.base_url(), self.locality, self.dns_verified())
     }
 }
 
@@ -198,26 +242,33 @@ impl RoutingConfig {
 
     /// Load-time pass: for each endpoint (and the default) with
     /// `locality = "local"` whose address isn't local by spelling, run
-    /// `require_local`; on success set `dns_local` so the override is
-    /// honoured, on failure report [`ConfigIssue::NotLocal`] (fatal).
-    /// **Products must call this at load**, before using
-    /// `effective_locality`; an unverified config fails closed. It may do
-    /// blocking DNS lookups: inside an async runtime use `spawn_blocking`.
-    pub fn verify_local(
+    /// `require_local` (system resolver); on success record that exact URL
+    /// as verified so the override is honoured, on failure report
+    /// [`ConfigIssue::NotLocal`] (fatal). **Products must call this at
+    /// load**, before using `effective_locality`; an unverified config, or
+    /// one whose `base_url` changed since, fails closed. Blocking DNS: inside
+    /// an async runtime use `spawn_blocking`, or
+    /// [`verify_local_with`](Self::verify_local_with).
+    pub fn verify_local(&mut self, default: &mut DefaultEndpoint) -> Vec<ConfigIssue> {
+        self.verify_local_with(default, &SystemResolver)
+    }
+
+    /// [`verify_local`](Self::verify_local) with an explicit resolver.
+    pub fn verify_local_with(
         &mut self,
         default: &mut DefaultEndpoint,
         r: &dyn Resolve,
     ) -> Vec<ConfigIssue> {
         let mut issues = Vec::new();
-        let mut one = |name: &str, url: Option<&str>, locality, flag: &mut bool| {
-            *flag = false;
+        let mut one = |name: &str, url: Option<&str>, locality, flag: &mut DnsVerified| {
+            flag.0 = None;
             let Some(url) = url.filter(|u| {
                 locality == Some(Locality::Local) && url_locality(u) == Locality::Cloud
             }) else {
                 return;
             };
             match require_local_with(url, r) {
-                Ok(()) => *flag = true,
+                Ok(()) => flag.0 = Some(url.to_owned()),
                 Err(e) => issues.push(ConfigIssue::NotLocal {
                     endpoint: name.to_owned(),
                     reason: e.to_string(),
@@ -225,10 +276,10 @@ impl RoutingConfig {
             }
         };
         let url = default.base_url().map(str::to_owned);
-        one(default.name.as_str(), url.as_deref(), default.locality, &mut default.dns_local);
+        one(default.name.as_str(), url.as_deref(), default.locality, &mut default.dns_verified);
         for (name, c) in &mut self.endpoints {
             let url = c.base_url().map(str::to_owned);
-            one(name, url.as_deref(), c.locality, &mut c.dns_local);
+            one(name, url.as_deref(), c.locality, &mut c.dns_verified);
         }
         issues
     }
@@ -240,12 +291,12 @@ impl RoutingConfig {
             default.name.as_str(),
             default.base_url(),
             default.locality,
-            default.dns_local,
+            default.dns_verified(),
             r,
             &mut issues,
         );
         for (name, c) in &self.endpoints {
-            endpoint_issues(name, c.base_url(), c.locality, c.dns_local, r, &mut issues);
+            endpoint_issues(name, c.base_url(), c.locality, c.dns_verified(), r, &mut issues);
         }
         let mut seen = BTreeSet::new();
         for entry in &self.models {
@@ -282,7 +333,7 @@ fn endpoint_issues(
     name: &str,
     base_url: Option<&str>,
     locality: Option<Locality>,
-    dns_local: bool,
+    dns_verified: bool,
     r: &dyn Resolve,
     issues: &mut Vec<ConfigIssue>,
 ) {
@@ -306,7 +357,7 @@ fn endpoint_issues(
         }
         Ok(()) => {}
     }
-    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud && !dns_local {
+    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud && !dns_verified {
         issues.push(ConfigIssue::LocalOverrideIgnored {
             endpoint: name.to_owned(),
             model: None,
@@ -316,19 +367,19 @@ fn endpoint_issues(
 
 /// The one locality rule for an endpoint, default or configured, in order:
 /// `locality = "cloud"` is `Cloud`; a local address ([`url_locality`]) is
-/// `Local`; `locality = "local"` with `dns_local` (verified by
+/// `Local`; `locality = "local"` with `dns_verified` (verified by
 /// [`RoutingConfig::verify_local`]) is `Local`; anything else, including no
 /// URL or an unverified override, is `Cloud` (fail closed).
 fn effective_locality(
     base_url: Option<&str>,
     locality: Option<Locality>,
-    dns_local: bool,
+    dns_verified: bool,
 ) -> Locality {
     if locality == Some(Locality::Cloud) {
         return Locality::Cloud;
     }
     if base_url.is_some_and(|u| url_locality(u) == Locality::Local)
-        || (locality == Some(Locality::Local) && dns_local)
+        || (locality == Some(Locality::Local) && dns_verified)
     {
         return Locality::Local;
     }
@@ -386,14 +437,39 @@ pub struct EndpointConfig {
     /// [`RoutingConfig::validate`] reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
-    /// Set by [`RoutingConfig::verify_local`]: the `locality = "local"`
-    /// override was honoured because `require_local` passed. Never from
-    /// TOML; `false` fails closed.
+    /// The URL [`RoutingConfig::verify_local`] confirmed with
+    /// `require_local`; never from TOML. Excluded from `==`
+    /// ([`DnsVerified`]).
     #[serde(skip)]
-    pub dns_local: bool,
+    pub(crate) dns_verified: DnsVerified,
 }
 
 impl EndpointConfig {
+    /// An endpoint of `kind` at `base_url` (`None`: the kind's default),
+    /// with no override.
+    pub fn new(kind: EndpointKind, base_url: Option<String>) -> Self {
+        EndpointConfig {
+            kind,
+            base_url,
+            locality: None,
+            dns_verified: DnsVerified::default(),
+        }
+    }
+
+    /// With a `locality` override.
+    #[must_use]
+    pub fn with_locality(mut self, locality: Locality) -> Self {
+        self.locality = Some(locality);
+        self
+    }
+
+    /// Whether [`RoutingConfig::verify_local`] confirmed the current URL
+    /// (so a `locality = "local"` override is honoured). Changing
+    /// `base_url` afterwards makes this `false` again.
+    pub fn dns_verified(&self) -> bool {
+        self.dns_verified.matches(self.base_url())
+    }
+
     /// The configured URL, else the kind's default.
     pub fn base_url(&self) -> Option<&str> {
         self.base_url.as_deref().or(self.kind.default_base_url())
@@ -405,7 +481,7 @@ impl EndpointConfig {
     /// at all is `Cloud` (fail closed). See [`effective_locality`] for the
     /// order; a `local` override counts only once verified.
     pub fn effective_locality(&self) -> Locality {
-        effective_locality(self.base_url(), self.locality, self.dns_local)
+        effective_locality(self.base_url(), self.locality, self.dns_verified())
     }
 }
 
@@ -579,7 +655,7 @@ summarize = { tier = "small" }
             kind: EndpointKind::Ollama,
             base_url: None,
             locality: None,
-            dns_local: false,
+            dns_verified: Default::default(),
         }
     }
 
@@ -835,8 +911,8 @@ base_url = "http://nonexistent.example.com"
                 model: None
             }]
         );
-        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
-        assert!(c.endpoints["box"].dns_local);
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
+        assert!(c.endpoints["box"].dns_verified());
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Local);
         assert_eq!(
             c.endpoint_locality(&d, "box"),
@@ -845,7 +921,7 @@ base_url = "http://nonexistent.example.com"
         assert_eq!(c.validate_with(&d, &stub()), vec![]);
         // No override: Cloud, with the hint.
         let mut c = src("lan-box.example.com", "");
-        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
         assert!(matches!(
             c.validate_with(&d, &stub()).as_slice(),
@@ -853,24 +929,51 @@ base_url = "http://nonexistent.example.com"
         ));
         // Override, but the name resolves public: NotLocal, stays Cloud.
         let mut c = src("pub.example.com", over);
-        let issues = c.verify_local(&mut d, &stub());
+        let issues = c.verify_local_with(&mut d, &stub());
         assert!(matches!(issues.as_slice(), [ConfigIssue::NotLocal { endpoint, .. }] if endpoint == "box"));
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
         // A cloud override wins over everything.
         let mut c = src("127.0.0.1", "locality = \"cloud\"");
-        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
-        // The default endpoint is verified too, and dns_local never reaches TOML.
+        // The default endpoint is verified too, and dns_verified never reaches TOML.
         let mut c = RoutingConfig::default();
         let mut d = default_at(
             EndpointKind::Ollama,
             Some("http://lan-box.example.com:11434"),
             Some(Locality::Local),
         );
-        assert_eq!(c.verify_local(&mut d, &stub()), vec![]);
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
         assert_eq!(d.effective_locality(), Locality::Local);
         let c = src("lan-box.example.com", over);
-        assert!(!toml::to_string(&c.endpoints["box"]).unwrap().contains("dns_local"));
+        assert!(!toml::to_string(&c.endpoints["box"]).unwrap().contains("dns_verified"));
+    }
+
+    #[test]
+    fn verification_goes_stale_when_the_url_changes_and_is_not_compared() {
+        let mut c = RoutingConfig::default();
+        c.endpoints.insert(
+            "box".into(),
+            EndpointConfig::new(
+                EndpointKind::Ollama,
+                Some("http://lan-box.example.com:11434".into()),
+            )
+            .with_locality(Locality::Local),
+        );
+        let unverified = c.clone();
+        let mut d = DefaultEndpoint::new("main", EndpointKind::Ollama);
+        assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
+        assert!(c.endpoints["box"].dns_verified());
+        assert_eq!(c, unverified, "verification state is not part of ==");
+        // Pointing it elsewhere afterwards fails closed.
+        c.endpoints.get_mut("box").unwrap().base_url = Some("http://pub.example.com:11434".into());
+        assert!(!c.endpoints["box"].dns_verified());
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        // Constructors on the default endpoint.
+        let d = DefaultEndpoint::new("m", EndpointKind::OpenaiCompat)
+            .with_base_url("http://10.0.0.2:1")
+            .with_locality(Locality::Cloud);
+        assert_eq!(d.effective_locality(), Locality::Cloud);
     }
 
     #[test]
@@ -936,7 +1039,7 @@ locality = "local"
             kind: EndpointKind::OpenaiCompat,
             base_url: Some("http://127.0.0.1:9".into()),
             locality: Some(Locality::Cloud),
-            dns_local: false,
+            dns_verified: Default::default(),
         };
         let c = toml::from_str::<Doc>("[[routing.models]]\nid = \"x\"\nlocality = \"local\"\n")
             .unwrap()

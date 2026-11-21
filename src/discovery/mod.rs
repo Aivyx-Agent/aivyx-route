@@ -294,7 +294,7 @@ mod tests {
             kind,
             base_url: base_url.map(str::to_string),
             locality: None,
-            dns_local: false,
+            dns_verified: Default::default(),
         }
     }
 

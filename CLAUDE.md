@@ -48,4 +48,4 @@ skips the discovery clients (feature `discovery`, off by default).
 
 Models are identified by `ModelKey` (endpoint, id), never by id alone.
 
-Everything outside `src/discovery/` must stay I/O-free and synchronous, with one exception: `src/guard.rs` (`require_local`) and the config functions built on it (`RoutingConfig::validate`, `verify_local`) may do blocking DNS lookups. In an async runtime call them from `spawn_blocking` or use the `_with` forms with your own `Resolve`. Products must call `verify_local` at load.
+Everything outside `src/discovery/` must stay I/O-free and synchronous, with one exception: `src/guard.rs` (`require_local`) and the config functions built on it (`RoutingConfig::validate`, `verify_local`) may do blocking DNS lookups. In an async runtime call them from `spawn_blocking`, or use `validate_with` / `verify_local_with` with your own `Resolve`. Products must call `verify_local` at load (it records the verified URL privately; a later `base_url` change fails closed).

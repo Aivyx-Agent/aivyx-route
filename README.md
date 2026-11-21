@@ -111,7 +111,8 @@ its kind:
   reports it. A LAN box with a DNS name passes
   `require_local` by resolving to private addresses; set `locality = "local"`
   on it and call `RoutingConfig::verify_local` at load (it verifies the
-  guard passes) to count its models as local. Unverified, it stays cloud.
+  guard passes for that exact URL; build endpoints with `EndpointConfig::new` /
+  `DefaultEndpoint::new`, not struct literals) to count its models as local. Unverified, it stays cloud.
 - A roster entry's `locality = "cloud"` marks that one model cloud. Its
   `locality = "local"` never makes a model on a cloud endpoint local: it is
   ignored and reported.
