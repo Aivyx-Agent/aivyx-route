@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1] - Unreleased
+
+### Fixed
+
+- An IPv4-mapped multicast or broadcast address (`::ffff:224.0.0.1`) now
+  gives `NotLocalReason::NotUnicast` ("multicast or broadcast address"), not
+  `PublicAddress` ("resolves to a public address"). It was refused before
+  too; only the reason was wrong.
+
 ## [0.3.0] - 2026-11-23
 
 Breaking.

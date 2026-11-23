@@ -72,7 +72,10 @@ fn address_reason(ip: IpAddr) -> NotLocalReason {
 fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_multicast() || v4.is_broadcast(),
-        IpAddr::V6(v6) => v6.is_multicast(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.is_multicast() || v4.is_broadcast(),
+            None => v6.is_multicast(),
+        },
     }
 }
 
@@ -470,6 +473,23 @@ mod tests {
             NotLocalReason::PublicAddress(ip("::ffff:8.8.8.8"))
         );
         assert!(require_local_with("http://[::ffff:127.0.0.1]/", &stub).is_ok());
+    }
+
+    #[test]
+    fn mapped_multicast_and_broadcast_get_not_unicast() {
+        let stub = Stub::default();
+        assert_eq!(
+            reason("http://[::ffff:224.0.0.1]/", &stub),
+            NotLocalReason::NotUnicast(ip("::ffff:224.0.0.1"))
+        );
+        assert_eq!(
+            reason("http://[::ffff:255.255.255.255]/", &stub),
+            NotLocalReason::NotUnicast(ip("::ffff:255.255.255.255"))
+        );
+        assert_eq!(
+            reason("http://[::ffff:8.8.8.8]/", &stub),
+            NotLocalReason::PublicAddress(ip("::ffff:8.8.8.8"))
+        );
     }
 
     #[test]
