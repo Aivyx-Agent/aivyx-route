@@ -100,13 +100,14 @@ its kind:
   link-local (`169.254/16`, `fe80::/10`) or CGNAT/Tailscale
   (`100.64.0.0/10`) range, or a hostname that is `localhost`, has no dots,
   or ends in `.local`, `.lan`, `.internal` or `.home.arpa`. Every other
-  host is shared (and `require_local` refuses it), so an `openai_compat`
-  endpoint at `https://api.groq.com/openai/v1` is shared. The host is the one the HTTP
+  host is not local, and the guard refuses it (`require_local`), so an
+  `openai_compat` endpoint at `https://api.groq.com/openai/v1` is refused, not
+  a tier. "Shared" is only a label for a less-trusted local or LAN server. The host is the one the HTTP
   client connects to, after URL parsing (percent-escapes decoded, IDN dots
   normalised, numeric IPv4 forms such as `0167772161` read as addresses);
   a single name written with a trailing dot (`ai.`) is fully qualified, so
-  shared. An endpoint with no address, a non-`http(s)` scheme, or a URL
-  that doesn't parse is shared too.
+  not local. An endpoint with no address, a non-`http(s)` scheme, or a URL
+  that doesn't parse is not local either.
 - An endpoint's `locality = "shared"` forces shared (`"cloud"` is read as an
   alias until 3.0). `"local"` is honoured
   only after verification (below), else it does nothing and `validate`

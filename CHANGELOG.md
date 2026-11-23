@@ -19,9 +19,11 @@ Breaking.
 - Pin-fallback reason reads "it's on a shared server"; `ConfigIssue` text and
   docs say "shared". `NotLocalReason::CloudHost` and its `cloud host` text
   are unchanged.
-
 - `LocalOnlyDns` is no longer a unit struct (it holds a resolver): build it
-  with `LocalOnlyDns::new()` or `LocalOnlyDns::with_resolver(Arc<dyn Resolve>)`.
+  with `LocalOnlyDns::new()` or `LocalOnlyDns::with_resolver(Arc<dyn Resolve>)`. It is also no longer
+  `Copy`.
+- `NotLocalReason::NotUnicast` is a new variant: exhaustive matches on
+  `NotLocalReason` stop compiling (see Added).
 
 ### Added
 

@@ -503,10 +503,12 @@ impl EndpointConfig {
         self.base_url.as_deref().or(self.kind.default_base_url())
     }
 
-    /// Whether requests to this endpoint leave the machine's network.
+    /// Whether this endpoint is `Local` or `Shared`. A shared endpoint is a
+    /// server on the operator's network that they trust less (say, a box other
+    /// people use); a URL that isn't local at all is refused, never a tier.
     /// `locality = "shared"` is `Shared`; otherwise the
     /// [`base_url`](Self::base_url) host decides ([`url_is_local`]); no URL
-    /// at all is `Shared` (fail closed). See [`effective_locality`] for the
+    /// at all is `Shared` (fail closed). See `effective_locality` (free function) for the
     /// order; a `local` override counts only once verified.
     pub fn effective_locality(&self) -> Locality {
         effective_locality(self.base_url(), self.locality, self.dns_verified())
@@ -662,6 +664,14 @@ summarize = { tier = "small" }
         let ep: EndpointConfig = toml::from_str("kind = \"lemonade\"").unwrap();
         assert_eq!(ep.kind, EndpointKind::Lemonade);
         assert_eq!(ep.base_url(), Some("http://127.0.0.1:13305/api"));
+    }
+
+    #[test]
+    fn shared_locality_serialises_as_shared() {
+        let ep: EndpointConfig =
+            toml::from_str("kind = \"lemonade\"\nlocality = \"shared\"").unwrap();
+        let out = toml::to_string(&ep).unwrap();
+        assert!(out.contains("locality = \"shared\""), "{out}");
     }
 
     #[test]

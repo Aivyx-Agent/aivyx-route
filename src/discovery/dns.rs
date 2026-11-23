@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::guard::{Resolve as BlockingResolve, SystemResolver, resolve_local_with};
 
 /// A reqwest DNS resolver that resolves through the system and fails unless
-/// every address is local ([`resolve_local`]); the `NotLocal` error is the
+/// every address is local ([`resolve_local_with`]); the `NotLocal` error is the
 /// boxed error, so reqwest's error chain carries its text.
 ///
 /// It is built on this crate's own blocking [`Resolve`](crate::Resolve) seam
