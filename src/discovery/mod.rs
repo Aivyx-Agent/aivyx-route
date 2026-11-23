@@ -10,8 +10,8 @@
 //! didn't arrive keeps every capability unknown, and an endpoint that
 //! hadn't listed its models is `Unreachable` ("timed out").
 //!
-//! Endpoints whose [`EndpointConfig::effective_locality`] is `Cloud` —
-//! cloud kinds, hosted addresses, `locality = "cloud"` — are never
+//! Endpoints whose [`EndpointConfig::effective_locality`] is `Shared` —
+//! hosted addresses, `locality = "shared"` — are never
 //! contacted: they report `NotProbed`, and residency skips them.
 
 mod dns;
@@ -200,18 +200,18 @@ async fn probe(
             "no base_url configured for endpoint `{endpoint}`"
         )),
         Some(base) => {
-            // Forced cloud: skipped without any lookup.
-            if config.locality == Some(Locality::Cloud) {
+            // Forced shared: skipped without any lookup.
+            if config.locality == Some(Locality::Shared) {
                 return DiscoveryOutcome::NotProbed;
             }
             // Local-only: never contact an endpoint that fails the guard.
             if let Err(e) = ensure_local(base).await {
                 return DiscoveryOutcome::Unreachable(e);
             }
-            // Whatever its kind, an endpoint the crate calls cloud (a name
+            // Whatever its kind, an endpoint the crate calls shared (a name
             // only DNS knows is local, with no verified override) is never
             // contacted.
-            if config.effective_locality() == Locality::Cloud {
+            if config.effective_locality() == Locality::Shared {
                 return DiscoveryOutcome::NotProbed;
             }
             let base = base.trim_end_matches('/');
@@ -334,13 +334,13 @@ mod tests {
         }
     }
 
-    /// Anything the crate calls cloud is never contacted, whatever its kind.
+    /// Anything the crate calls shared is never contacted, whatever its kind.
     #[tokio::test]
-    async fn endpoints_whose_address_is_cloud_are_never_probed() {
+    async fn endpoints_whose_address_is_shared_are_never_probed() {
         let server = slow_ollama(1, Duration::ZERO, Duration::ZERO).await;
         let client = reqwest::Client::new();
         let mut forced = cfg(EndpointKind::Ollama, Some(&server.uri()));
-        forced.locality = Some(crate::profile::Locality::Cloud);
+        forced.locality = Some(crate::profile::Locality::Shared);
         let r = discover(&EndpointRef::new("forced"), &forced, &client).await;
         assert_eq!(r.outcome, DiscoveryOutcome::NotProbed);
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -414,15 +414,15 @@ mod tests {
             .await;
         let mut config = RoutingConfig::default();
         let mut forced = cfg(EndpointKind::OpenaiCompat, Some(&server.uri()));
-        forced.locality = Some(Locality::Cloud);
-        config.endpoints.insert("z-cloud".into(), forced);
+        forced.locality = Some(Locality::Shared);
+        config.endpoints.insert("z-shared".into(), forced);
         config.endpoints.insert(
             "a-local".into(),
             cfg(EndpointKind::OpenaiCompat, Some(&server.uri())),
         );
         let reports = discover_all(&config, &reqwest::Client::new()).await;
         let names: Vec<&str> = reports.iter().map(|r| r.endpoint.as_str()).collect();
-        assert_eq!(names, vec!["a-local", "z-cloud"]);
+        assert_eq!(names, vec!["a-local", "z-shared"]);
         assert!(
             matches!(reports[0].outcome, DiscoveryOutcome::Reached(ref m) if m[0].id == "qwen3-8b-q4_k_m.gguf")
         );

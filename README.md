@@ -8,9 +8,9 @@ Task-aware model routing shared by `aivyx-pa` and `aivyx-coder`. Given the
 models you have (auto-discovered and/or declared) and what a request needs,
 it picks one deterministically and says why.
 
-**Local-only:** the cloud endpoint kinds (`anthropic`, `openai`) were removed
+**Local-only:** the hosted endpoint kinds (`anthropic`, `openai`) were removed
 in 0.2.0; a config naming them fails to parse. `require_local(url)` is the
-guard: a URL is local when `url_locality` says so, or when its host name
+guard: a URL is local when `url_is_local` says so, or when its host name
 resolves (system resolver) to addresses that are all loopback, private,
 link-local, CGNAT or unspecified. `RoutingConfig::validate` reports
 `ConfigIssue::NotLocal` for any endpoint that fails it (products treat it as
@@ -87,10 +87,11 @@ your name for it, instead of adding a second one. Listing both spellings
 names one model (kept as `llama3.2:latest`); both entries apply to it, in
 roster order.
 
-### Local or cloud
+### Local or shared
 
-A model is *cloud* when requests to it leave your network; routing only
-picks cloud models when the product allows it. An endpoint's locality
+Every model URL must be local. A model is *shared* when it runs on a local
+server you trust less than your own machine (say, a box other people also
+use); routing only picks shared models when the product allows it. An endpoint's locality
 (`EndpointConfig::effective_locality()`) comes from its address, not just
 its kind:
 
@@ -99,22 +100,23 @@ its kind:
   link-local (`169.254/16`, `fe80::/10`) or CGNAT/Tailscale
   (`100.64.0.0/10`) range, or a hostname that is `localhost`, has no dots,
   or ends in `.local`, `.lan`, `.internal` or `.home.arpa`. Every other
-  host is cloud, so an `openai_compat` endpoint at
-  `https://api.groq.com/openai/v1` is cloud. The host is the one the HTTP
+  host is shared (and `require_local` refuses it), so an `openai_compat`
+  endpoint at `https://api.groq.com/openai/v1` is shared. The host is the one the HTTP
   client connects to, after URL parsing (percent-escapes decoded, IDN dots
   normalised, numeric IPv4 forms such as `0167772161` read as addresses);
   a single name written with a trailing dot (`ai.`) is fully qualified, so
-  cloud. An endpoint with no address, a non-`http(s)` scheme, or a URL
-  that doesn't parse is cloud too.
-- An endpoint's `locality = "cloud"` forces cloud. `"local"` is honoured
+  shared. An endpoint with no address, a non-`http(s)` scheme, or a URL
+  that doesn't parse is shared too.
+- An endpoint's `locality = "shared"` forces shared (`"cloud"` is read as an
+  alias until 3.0). `"local"` is honoured
   only after verification (below), else it does nothing and `validate`
   reports it. A LAN box with a DNS name passes
   `require_local` by resolving to private addresses; set `locality = "local"`
   on it and call `RoutingConfig::verify_local` at load (it verifies the
   guard passes for that exact URL; build endpoints with `EndpointConfig::new` /
-  `DefaultEndpoint::new`, not struct literals) to count its models as local. Unverified, it stays cloud.
-- A roster entry's `locality = "cloud"` marks that one model cloud. Its
-  `locality = "local"` never makes a model on a cloud endpoint local: it is
+  `DefaultEndpoint::new`, not struct literals) to count its models as local. Unverified, it stays shared.
+- A roster entry's `locality = "shared"` marks that one model shared. Its
+  `locality = "local"` never makes a model on a shared endpoint local: it is
   ignored and reported.
 
 An in-process backend (mistralrs, no URL) is declared with
@@ -123,10 +125,10 @@ contacted, its models selected as local. Nothing else is local without a URL.
 
 The product's default backend (`DefaultEndpoint`) follows the same rule:
 the product passes its kind, its `base_url` (else the kind's default) and
-any `locality` override, so a remote default backend is cloud and one with
-no address at all is cloud too. An `endpoint` that is neither the product's default nor a
+any `locality` override, so a remote default backend is shared and one with
+no address at all is shared too. An `endpoint` that is neither the product's default nor a
 `[routing.endpoints]` key (a typo, say) fails closed: its models are treated
-as cloud and unavailable, so they are never selected.
+as shared and unavailable, so they are never selected.
 
 `RoutingConfig::validate(&default)` reports unknown endpoints, duplicate
 models, local endpoints (the default included) with no `base_url`,
@@ -160,7 +162,7 @@ thinking model, but an unlabelled one may still think, so thinking is
 otherwise unknown, as is audio; the base is `.../api`, and a trailing
 `/v1` is tolerated). An endpoint that fails `require_local` is never contacted (discovery
 reports it `Unreachable` with the `NotLocal` text, residency skips it), and
-one marked `locality = "cloud"` is `NotProbed` (see *Local or cloud*). Endpoints are
+one marked `locality = "shared"` is `NotProbed` (see *Local or shared*). Endpoints are
 probed concurrently, Ollama's `/api/show` calls 8 at a time, and the whole
 run stops at a deadline (15 s; `discover_all_within` / `discover_within`
 take another, and fall back to 15 s for one too large to represent): whatever was found by then is returned, a model whose
@@ -235,10 +237,10 @@ Semantics (operator-approved in model-routing Part 2):
   session's sticky model;
 - a pin never writes the sticky map, and `unpin` clears it too;
 - a pin wins over ranking (a model that may lack a need is still used,
-  with a warning in the reason). While cloud routing is off, a pin to a
-  cloud model, or to one no longer among the candidates (nothing says
+  with a warning in the reason). While shared routing is off, a pin to a
+  shared model, or to one no longer among the candidates (nothing says
   where it is), is ignored: selection runs as if unpinned, the reason
-  starts "ignored pin to …", and the pin is kept. With cloud routing on, a
+  starts "ignored pin to …", and the pin is kept. With shared routing on, a
   pin to a model no longer among the candidates is used, with a warning.
 
 ## Residency (Part 4)

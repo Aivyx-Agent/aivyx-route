@@ -34,7 +34,7 @@ pub fn endpoints_of(config: &RoutingConfig) -> Vec<(EndpointRef, EndpointConfig)
 }
 
 /// One residency snapshot from every source: Ollama, llama.cpp-router and
-/// Lemonade endpoints (never one whose effective locality is `Cloud`),
+/// Lemonade endpoints (never one whose effective locality is `Shared`),
 /// then the broker (whose VRAM figure wins), then `vram_bytes`
 /// as the total when nothing reported VRAM.
 pub async fn collect(
@@ -45,8 +45,8 @@ pub async fn collect(
 ) -> ResidencySnapshot {
     let mut snap = ResidencySnapshot::default();
     for (name, endpoint) in endpoints {
-        // Never poll anything the crate calls cloud.
-        if endpoint.effective_locality() == Locality::Cloud {
+        // Never poll anything the crate calls shared.
+        if endpoint.effective_locality() == Locality::Shared {
             continue;
         }
         let Some(base) = endpoint.base_url() else {
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn endpoints_whose_address_is_cloud_are_never_polled() {
+    async fn endpoints_whose_address_is_shared_are_never_polled() {
         let server = serve("/api/ps", PS).await;
         Mock::given(method("GET"))
             .and(path("/api/tags"))
@@ -467,7 +467,7 @@ mod tests {
             .mount(&server)
             .await;
         let mut forced = endpoint(EndpointKind::Ollama, &server.uri());
-        forced.locality = Some(crate::profile::Locality::Cloud);
+        forced.locality = Some(crate::profile::Locality::Shared);
         let snap = collect(
             &[
                 (EndpointRef::new("forced"), forced),
@@ -1020,7 +1020,7 @@ mod tests {
                     endpoint(EndpointKind::Lemonade, "http://127.0.0.1:1"),
                 ),
                 (
-                    EndpointRef::new("cloud"),
+                    EndpointRef::new("shared"),
                     EndpointConfig {
                         kind: EndpointKind::Ollama,
                         base_url: Some("https://api.groq.com".into()),

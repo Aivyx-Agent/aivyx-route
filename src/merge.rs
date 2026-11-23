@@ -25,7 +25,7 @@ pub enum DiscoveryOutcome {
     Reached(Vec<DiscoveredModel>),
     /// The endpoint could not be queried; the string says why.
     Unreachable(String),
-    /// Deliberately not probed (cloud endpoints).
+    /// Deliberately not probed (shared endpoints).
     NotProbed,
 }
 
@@ -39,9 +39,9 @@ pub struct DiscoveryReport {
 /// roster entries, plus roster-only models. Sorted by `(endpoint, id)`.
 ///
 /// An endpoint that is neither `default` nor a `[routing.endpoints]` key
-/// fails closed: its models are `Cloud` and `Unavailable`. Locality comes
-/// from [`RoutingConfig::endpoint_locality`]; a roster `locality = "cloud"`
-/// makes a model cloud, but a roster `locality = "local"` never makes one
+/// fails closed: its models are `Shared` and `Unavailable`. Locality comes
+/// from [`RoutingConfig::endpoint_locality`]; a roster `locality = "shared"`
+/// makes a model shared, but a roster `locality = "local"` never makes one
 /// local, and neither changes availability.
 ///
 /// Duplicate roster entries for the same (endpoint, id) apply in order, each
@@ -62,11 +62,11 @@ pub fn merge(
     };
     // Configured endpoints: their address decides (see
     // `EndpointConfig::effective_locality`). Unknown endpoints fail closed:
-    // a typo must never make a cloud model look local.
+    // a typo must never make a shared model look local.
     let endpoint_locality = |ep: &EndpointRef| {
         config
             .endpoint_locality(default, ep.as_str())
-            .unwrap_or(Locality::Cloud)
+            .unwrap_or(Locality::Shared)
     };
     let outcome_of = |ep: &EndpointRef| {
         reports
@@ -157,10 +157,10 @@ pub fn merge(
         if let Some(priority) = entry.priority {
             p.priority = priority;
         }
-        // Only towards cloud: a roster entry must never make a model on a
-        // cloud endpoint look local.
-        if entry.locality == Some(Locality::Cloud) {
-            p.locality = Locality::Cloud;
+        // Only towards shared: a roster entry must never make a model on a
+        // shared endpoint look local.
+        if entry.locality == Some(Locality::Shared) {
+            p.locality = Locality::Shared;
         }
         p.source.in_roster = true;
     }
@@ -520,18 +520,18 @@ mod tests {
             EndpointConfig {
                 kind: EndpointKind::OpenaiCompat,
                 base_url: Some("http://127.0.0.1:9".into()),
-                locality: Some(Locality::Cloud),
+                locality: Some(Locality::Shared),
                 dns_verified: Default::default(),
             },
         );
         let mut claude = entry("claude-sonnet-5");
         claude.endpoint = Some("anthropic".into());
         let mut forced = entry("forced");
-        forced.locality = Some(Locality::Cloud);
+        forced.locality = Some(Locality::Shared);
         config.models = vec![claude, forced, entry("local-one")];
         let ps = merge(&config, &local_default("main"), &[]);
-        assert_eq!(find(&ps, "claude-sonnet-5").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "forced").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "claude-sonnet-5").locality, Locality::Shared);
+        assert_eq!(find(&ps, "forced").locality, Locality::Shared);
         assert_eq!(find(&ps, "local-one").locality, Locality::Local);
     }
 
@@ -548,7 +548,7 @@ base_url = "https://api.groq.com/openai/v1"
 [endpoints.lan]
 kind = "ollama"
 base_url = "http://gpu.example.com:11434"
-# An override can only lower trust: this stays cloud.
+# An override can only lower trust: this stays shared.
 locality = "local"
 
 [endpoints.home]
@@ -569,9 +569,9 @@ base_url = "http://192.168.1.20:8080"
             ..config
         };
         let ps = merge(&config, &local_default("main"), &reports);
-        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "kimi").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "qwen3:8b").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Shared);
+        assert_eq!(find(&ps, "kimi").locality, Locality::Shared);
+        assert_eq!(find(&ps, "qwen3:8b").locality, Locality::Shared);
         assert_eq!(find(&ps, "gemma").locality, Locality::Local);
 
         let groq_only = merge(&config, &local_default("main"), &reports[..1]);
@@ -580,20 +580,20 @@ base_url = "http://192.168.1.20:8080"
             .build();
         assert!(
             select(&req, &groq_only, &Policy::default()).is_err(),
-            "cloud off must never pick a hosted endpoint"
+            "allow_shared off must never pick a hosted endpoint"
         );
     }
 
     #[test]
-    fn a_default_endpoint_at_a_hosted_address_makes_its_models_cloud() {
+    fn a_default_endpoint_at_a_hosted_address_makes_its_models_shared() {
         let hosted = DefaultEndpoint {
             base_url: Some("https://api.groq.com/openai/v1".into()),
             ..DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
         };
         let reports = [reached("main", vec![found("llama-3.3-70b", &[], None)])];
         let ps = merge(&config_with(vec![entry("kimi")]), &hosted, &reports);
-        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "kimi").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Shared);
+        assert_eq!(find(&ps, "kimi").locality, Locality::Shared);
         let lan = DefaultEndpoint {
             base_url: Some("http://192.168.1.20:8080".into()),
             ..DefaultEndpoint::new("main", EndpointKind::OpenaiCompat)
@@ -763,7 +763,7 @@ base_url = "http://192.168.1.20:8080"
         typo.endpoint = Some("olama-main".into());
         let ps = merge(&config_with(vec![typo]), &local_default("main"), &[]);
         let p = find(&ps, "m");
-        assert_eq!(p.locality, Locality::Cloud);
+        assert_eq!(p.locality, Locality::Shared);
         assert_eq!(p.availability, Availability::Unavailable);
 
         use crate::requirements::{Requirements, TaskKind, TaskOverrides};
@@ -772,7 +772,7 @@ base_url = "http://192.168.1.20:8080"
             .task(&TaskKind::Chat, &TaskOverrides::default())
             .build();
         let allow = Policy {
-            allow_cloud: true,
+            allow_shared: true,
             ..Policy::default()
         };
         assert!(select(&req, &ps, &allow).is_err());
@@ -785,12 +785,12 @@ base_url = "http://192.168.1.20:8080"
         typo.locality = Some(Locality::Local);
         let ps = merge(&config_with(vec![typo]), &local_default("main"), &[]);
         let p = find(&ps, "m");
-        assert_eq!(p.locality, Locality::Cloud);
+        assert_eq!(p.locality, Locality::Shared);
         assert_eq!(p.availability, Availability::Unavailable);
     }
 
     #[test]
-    fn a_roster_locality_can_only_move_a_model_towards_cloud() {
+    fn a_roster_locality_can_only_move_a_model_towards_shared() {
         use crate::requirements::{Requirements, TaskKind, TaskOverrides};
         use crate::select::{Policy, select};
         let mut config: RoutingConfig = toml::from_str(
@@ -815,30 +815,30 @@ base_url = "https://api.groq.com/openai/v1"
         config.models = vec![
             on("claude-sonnet", Some("claude"), Locality::Local),
             on("llama-3.3-70b", Some("groq"), Locality::Local),
-            on("cloudy", None, Locality::Cloud),
+            on("cloudy", None, Locality::Shared),
         ];
         let reports = [reached("claude", vec![]), reached("groq", vec![])];
         let ps = merge(&config, &local_default("main"), &reports);
-        assert_eq!(find(&ps, "claude-sonnet").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Cloud);
-        assert_eq!(find(&ps, "cloudy").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "claude-sonnet").locality, Locality::Shared);
+        assert_eq!(find(&ps, "llama-3.3-70b").locality, Locality::Shared);
+        assert_eq!(find(&ps, "cloudy").locality, Locality::Shared);
         let req = Requirements::builder()
             .task(&TaskKind::Chat, &TaskOverrides::default())
             .build();
         assert!(select(&req, &ps, &Policy::default()).is_err());
 
-        // A cloud default endpoint's models stay cloud too.
+        // A shared default endpoint's models stay shared too.
         let default = DefaultEndpoint {
             name: ep("main"),
             kind: EndpointKind::OpenaiCompat,
             base_url: None,
-            locality: Some(Locality::Cloud),
+            locality: Some(Locality::Shared),
             dns_verified: Default::default(),
             in_process: false,
         };
         let config = config_with(vec![on("claude-haiku", None, Locality::Local)]);
         let ps = merge(&config, &default, &[]);
-        assert_eq!(find(&ps, "claude-haiku").locality, Locality::Cloud);
+        assert_eq!(find(&ps, "claude-haiku").locality, Locality::Shared);
     }
 
     #[test]
@@ -848,7 +848,7 @@ base_url = "https://api.groq.com/openai/v1"
         let p = find(&ps, "qwen");
         assert_eq!(p.locality, Locality::Local);
         assert_ne!(p.availability, Availability::Unavailable);
-        // And routing, with cloud off, can pick it.
+        // And routing, with allow_shared off, can pick it.
         use crate::requirements::{Requirements, TaskKind, TaskOverrides};
         use crate::select::{Policy, select};
         let req = Requirements::builder()
@@ -858,18 +858,18 @@ base_url = "https://api.groq.com/openai/v1"
     }
 
     #[test]
-    fn a_cloud_default_endpoint_makes_its_models_cloud() {
+    fn a_shared_default_endpoint_makes_its_models_shared() {
         let default = DefaultEndpoint {
             name: ep("anthropic"),
             kind: EndpointKind::OpenaiCompat,
             base_url: None,
-            locality: Some(Locality::Cloud),
+            locality: Some(Locality::Shared),
             dns_verified: Default::default(),
             in_process: false,
         };
         let ps = merge(&config_with(vec![entry("claude-sonnet-5")]), &default, &[]);
         let p = find(&ps, "claude-sonnet-5");
-        assert_eq!(p.locality, Locality::Cloud);
+        assert_eq!(p.locality, Locality::Shared);
         assert_eq!(p.availability, Availability::Unverified);
     }
 

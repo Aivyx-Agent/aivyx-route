@@ -25,7 +25,7 @@ pub use guard::{
     NotLocal, NotLocalReason, Resolve, SystemResolver, require_local, require_local_with,
     resolve_local, resolve_local_with,
 };
-pub use locality::url_locality;
+pub use locality::url_is_local;
 pub use merge::{DiscoveredModel, DiscoveryOutcome, DiscoveryReport, merge};
 pub use profile::{
     Availability, Capability, CapabilitySet, EndpointRef, Locality, ModelKey, ModelProfile,

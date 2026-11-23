@@ -1,5 +1,4 @@
-//! Where an endpoint's address points: on this machine or network
-//! (`Local`), or anywhere else (`Cloud`). No DNS: the host is classified as
+//! Whether an endpoint's address is on this machine or network. No DNS: the host is classified as
 //! the HTTP client will see it, after WHATWG URL parsing (percent-decoding,
 //! IDNA, numeric IPv4 forms).
 
@@ -7,26 +6,24 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use url::{Host, Url};
 
-use crate::profile::Locality;
-
-/// The locality an endpoint URL implies, from its host alone.
+/// Whether an endpoint URL's host is local, from its host alone.
 ///
 /// The URL is parsed as the HTTP client parses it (`http://` is assumed
-/// when there is no scheme). `Local` for an IP in a loopback, private
+/// when there is no scheme). `true` for an IP in a loopback, private
 /// (RFC 1918, ULA `fc00::/7`), link-local, CGNAT/Tailscale
 /// (`100.64.0.0/10`) or unspecified range, and for a domain that is
 /// `localhost` (or ends in `.localhost`), is a single dotless label, or
 /// ends in `.local`, `.lan`, `.internal` or `.home.arpa`. A single label
-/// with a trailing dot (`ai.`) is a fully qualified name, so `Cloud`
-/// (`localhost.` stays `Local`). `Cloud` for every other host, for a
+/// with a trailing dot (`ai.`) is a fully qualified name, so `false`
+/// (`localhost.` stays local). `false` for every other host, for a
 /// scheme other than `http`/`https`, and for a URL that doesn't parse or
 /// has no host (fail closed).
-pub fn url_locality(url: &str) -> Locality {
+pub fn url_is_local(url: &str) -> bool {
     match parse_host(url) {
-        Some(Host::Ipv4(ip)) => locality_if(v4_is_local(ip)),
-        Some(Host::Ipv6(ip)) => locality_if(ip_is_local(IpAddr::V6(ip))),
-        Some(Host::Domain(domain)) => locality_if(domain_is_local(&domain)),
-        None => Locality::Cloud,
+        Some(Host::Ipv4(ip)) => v4_is_local(ip),
+        Some(Host::Ipv6(ip)) => ip_is_local(IpAddr::V6(ip)),
+        Some(Host::Domain(domain)) => domain_is_local(&domain),
+        None => false,
     }
 }
 
@@ -74,14 +71,6 @@ pub(crate) fn parse_http_url(url: &str) -> Option<Url> {
 fn has_http_scheme(url: &str) -> bool {
     let lower = url.get(..6).unwrap_or(url).to_ascii_lowercase();
     lower.starts_with("http:") || lower.starts_with("https:")
-}
-
-fn locality_if(local: bool) -> Locality {
-    if local {
-        Locality::Local
-    } else {
-        Locality::Cloud
-    }
 }
 
 /// `domain` is already lowercase ASCII (IDNA-normalised) from the parser.
@@ -163,12 +152,12 @@ mod tests {
             "localhost:8080",
             "localhost:8080/v1",
         ] {
-            assert_eq!(url_locality(url), Locality::Local, "{url}");
+            assert!(url_is_local(url), "{url}");
         }
     }
 
     #[test]
-    fn everything_else_is_cloud() {
+    fn everything_else_is_not_local() {
         for url in [
             "https://api.groq.com/openai/v1",
             "https://openrouter.ai/api/v1",
@@ -210,7 +199,7 @@ mod tests {
             "foo:/evil.com",
             "localhost:/x",
         ] {
-            assert_eq!(url_locality(url), Locality::Cloud, "{url}");
+            assert!(!url_is_local(url), "{url}");
         }
     }
 

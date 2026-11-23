@@ -18,8 +18,8 @@ use crate::residency::{ResidencyNote, ResidencySnapshot, TIER_STEP};
 pub struct Policy {
     /// The conversation's current model. Kept if it meets every hard need.
     pub sticky_model: Option<ModelKey>,
-    /// Cloud profiles are candidates only when `true`.
-    pub allow_cloud: bool,
+    /// Shared profiles are candidates only when `true`.
+    pub allow_shared: bool,
     /// Models never to select.
     pub exclude: Vec<ModelKey>,
     /// Which models are loaded and what VRAM is free. Soft: see
@@ -216,7 +216,7 @@ pub fn find<'a>(profiles: &'a [ModelProfile], key: &ModelKey) -> Option<&'a Mode
 fn is_eligible(p: &ModelProfile, req: &Requirements, policy: &Policy) -> bool {
     p.availability != Availability::Unavailable
         && !policy.exclude.contains(&p.key())
-        && (policy.allow_cloud || p.locality == Locality::Local)
+        && (policy.allow_shared || p.locality == Locality::Local)
         && (req.hard.embedding || !p.is_embedding_only())
 }
 
@@ -621,20 +621,20 @@ mod tests {
     }
 
     #[test]
-    fn cloud_models_need_allow_cloud() {
+    fn shared_models_need_allow_shared() {
         let req = for_task(TaskKind::Plan).build();
-        let mut cloud = m("cloud-large", Tier::Large);
-        cloud.locality = Locality::Cloud;
-        let c = [cloud, m("local-mid", Tier::Medium)];
+        let mut shared = m("shared-large", Tier::Large);
+        shared.locality = Locality::Shared;
+        let c = [shared, m("local-mid", Tier::Medium)];
         assert_eq!(
             select(&req, &c, &Policy::default()).unwrap().model.id,
             "local-mid"
         );
         let allow = Policy {
-            allow_cloud: true,
+            allow_shared: true,
             ..Policy::default()
         };
-        assert_eq!(select(&req, &c, &allow).unwrap().model.id, "cloud-large");
+        assert_eq!(select(&req, &c, &allow).unwrap().model.id, "shared-large");
     }
 
     #[test]

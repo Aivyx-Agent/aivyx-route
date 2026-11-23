@@ -97,13 +97,19 @@ impl fmt::Display for Strength {
     }
 }
 
-/// Whether requests to this model leave the machine.
+/// How far the operator trusts the server a model runs on. Every model URL
+/// is local-only; `Shared` labels a local endpoint trusted less than the
+/// operator's own machine.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Locality {
     #[default]
     Local,
-    Cloud,
+    /// A model server on the operator's network that they trust less than
+    /// their own machine (e.g. a box other people also use). Never selected
+    /// unless the product allows it. `"cloud"` is read as an alias until 3.0.
+    #[serde(alias = "cloud")]
+    Shared,
 }
 
 /// Whether the model can currently be routed to.
@@ -279,14 +285,26 @@ mod tests {
     }
 
     #[test]
+    fn locality_reads_shared_and_the_cloud_alias() {
+        #[derive(serde::Deserialize)]
+        struct D {
+            locality: Locality,
+        }
+        for v in ["shared", "cloud"] {
+            let d: D = toml::from_str(&format!("locality = \"{v}\"")).unwrap();
+            assert_eq!(d.locality, Locality::Shared, "{v}");
+        }
+    }
+
+    #[test]
     fn enums_use_snake_case_on_the_wire() {
         assert_eq!(
             serde_json::to_string(&Capability::Vision).unwrap(),
             "\"vision\""
         );
         assert_eq!(
-            serde_json::to_string(&Locality::Cloud).unwrap(),
-            "\"cloud\""
+            serde_json::to_string(&Locality::Shared).unwrap(),
+            "\"shared\""
         );
         let t: Tier = serde_json::from_str("\"small\"").unwrap();
         assert_eq!(t, Tier::Small);

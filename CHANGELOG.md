@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.0] - Unreleased
+
+Breaking.
+
+### Changed
+
+- The `Cloud` tier is now `Locality::Shared`: since 0.2.0 every model URL
+  must be local, so the tier only labels a local endpoint the operator
+  trusts less. TOML and JSON write `"shared"`; `"cloud"` is still read, as
+  an alias, until 3.0. **Serialized `RoutingConfig` output changes from
+  `"cloud"` to `"shared"`: a 2.0 product cannot read a config that a 2.1
+  product wrote with `"shared"`.** Stable-surface snapshots in the products
+  need regenerating.
+- `Policy::allow_cloud` is `Policy::allow_shared`; `Router::with_allow_cloud`
+  is `Router::with_allow_shared`.
+- `url_is_local(url) -> bool` replaces `url_locality` (same rules, no DNS).
+- Pin-fallback reason reads "it's on a shared server"; `ConfigIssue` text and
+  docs say "shared". `NotLocalReason::CloudHost` and its `cloud host` text
+  are unchanged.
+
+### Removed
+
+- `url_locality` (use `url_is_local`), `EndpointKind::locality()` and
+  `Policy::allow_cloud` / `Router::with_allow_cloud` (see above).
+
 ## 0.2.0
 
 Local-only. Breaking.

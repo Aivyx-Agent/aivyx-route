@@ -126,7 +126,7 @@ context_window = 200000
         "nomic-embed-text:latest"
     );
 
-    // Huge context: nothing local qualifies; the cloud model does once allowed.
+    // Huge context: nothing local qualifies; the shared model does once allowed.
     let req = Requirements::builder()
         .task(&TaskKind::Plan, &config.tasks)
         .min_context(300_000)
@@ -139,12 +139,12 @@ context_window = 200000
         .vision()
         .build();
     assert!(select(&req, &profiles, &local).is_err());
-    let cloud = Policy {
-        allow_cloud: true,
+    let shared = Policy {
+        allow_shared: true,
         ..Policy::default()
     };
     assert_eq!(
-        select(&req, &profiles, &cloud).unwrap().model.id,
+        select(&req, &profiles, &shared).unwrap().model.id,
         "claude-sonnet-5"
     );
 }

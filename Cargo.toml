@@ -3,7 +3,7 @@
 [package]
 name = "aivyx-route"
 description = "Task-aware model routing shared by Aivyx PA and aivyx-coder: capability matching, tiering, discovery"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "BUSL-1.1"
 publish = false

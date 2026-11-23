@@ -7,7 +7,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::guard::{Resolve, SystemResolver, require_local_with};
-use crate::locality::{url_host, url_locality};
+use crate::locality::{url_host, url_is_local};
 use crate::profile::{CapabilitySet, EndpointRef, Locality, Strength, Tier};
 use crate::requirements::TaskOverrides;
 
@@ -106,7 +106,7 @@ impl DefaultEndpoint {
     /// `verify_local` and discovery never look it up; routing selects its
     /// models as local. This is the only way to get a URL-less local
     /// endpoint: any ordinary endpoint with no URL (even with
-    /// `locality = "local"`) is still `Cloud`. A `locality = "cloud"`
+    /// `locality = "local"`) is still `Shared`. A `locality = "shared"`
     /// override still applies; [`with_base_url`](Self::with_base_url) makes
     /// it an ordinary endpoint again.
     pub fn in_process(name: impl Into<String>) -> Self {
@@ -149,7 +149,7 @@ impl DefaultEndpoint {
 
     /// Same rule as [`EndpointConfig::effective_locality`].
     pub fn effective_locality(&self) -> Locality {
-        if self.is_in_process() && self.locality != Some(Locality::Cloud) {
+        if self.is_in_process() && self.locality != Some(Locality::Shared) {
             return Locality::Local;
         }
         effective_locality(self.base_url(), self.locality, self.dns_verified())
@@ -170,13 +170,13 @@ pub enum ConfigIssue {
     MissingBaseUrl { endpoint: String },
     /// An endpoint whose `base_url` name resolves only to local addresses
     /// but isn't recognisably local by its spelling, with no `locality`
-    /// override: its models count as cloud. Set `locality = "local"` on the
+    /// override: its models count as shared. Set `locality = "local"` on the
     /// endpoint to use them.
     NonLocalAddress { endpoint: String, host: String },
     /// A `locality = "local"` override that has no effect: on the endpoint
     /// itself (`model` is `None`) because its address isn't local by
-    /// [`url_locality`] and [`RoutingConfig::verify_local`] didn't pass (or
-    /// wasn't called); or on a roster entry for a model on a cloud-class
+    /// [`url_is_local`] and [`RoutingConfig::verify_local`] didn't pass (or
+    /// wasn't called); or on a roster entry for a model on a shared-class
     /// endpoint (a roster override can only lower trust).
     LocalOverrideIgnored {
         endpoint: String,
@@ -213,7 +213,7 @@ impl fmt::Display for ConfigIssue {
             ConfigIssue::NonLocalAddress { endpoint, host } => write!(
                 f,
                 "endpoint `{endpoint}` points at `{host}`, which resolves to local addresses but \
-                 isn't recognised as a local name, so its models count as cloud; set \
+                 isn't recognised as a local name, so its models count as shared; set \
                  `locality = \"local\"` on the endpoint to use them"
             ),
             ConfigIssue::NotLocal { endpoint, reason } => {
@@ -234,7 +234,7 @@ impl fmt::Display for ConfigIssue {
                 model: Some(model),
             } => write!(
                 f,
-                "model `{model}` is on cloud endpoint `{endpoint}`; its `locality = \"local\"` is \
+                "model `{model}` is on shared endpoint `{endpoint}`; its `locality = \"local\"` is \
                  ignored"
             ),
         }
@@ -245,7 +245,7 @@ impl RoutingConfig {
     /// The locality of the endpoint named `name`: the default endpoint's
     /// [`effective_locality`](DefaultEndpoint::effective_locality), or a `[routing.endpoints]` entry's
     /// [`effective_locality`](EndpointConfig::effective_locality). `None`
-    /// for a name that is neither (callers fail closed to `Cloud`).
+    /// for a name that is neither (callers fail closed to `Shared`).
     pub fn endpoint_locality(&self, default: &DefaultEndpoint, name: &str) -> Option<Locality> {
         if name == default.name.as_str() {
             Some(default.effective_locality())
@@ -291,9 +291,8 @@ impl RoutingConfig {
         let mut issues = Vec::new();
         let mut one = |name: &str, url: Option<&str>, locality, flag: &mut DnsVerified| {
             flag.0 = None;
-            let Some(url) = url.filter(|u| {
-                locality == Some(Locality::Local) && url_locality(u) == Locality::Cloud
-            }) else {
+            let Some(url) = url.filter(|u| locality == Some(Locality::Local) && !url_is_local(u))
+            else {
                 return;
             };
             match require_local_with(url, r) {
@@ -353,7 +352,7 @@ impl RoutingConfig {
                     model: entry.id.clone(),
                     endpoint: endpoint.clone(),
                 }),
-                Some(Locality::Cloud) if entry.locality == Some(Locality::Local) => {
+                Some(Locality::Shared) if entry.locality == Some(Locality::Local) => {
                     issues.push(ConfigIssue::LocalOverrideIgnored {
                         endpoint: endpoint.clone(),
                         model: Some(entry.id.clone()),
@@ -387,13 +386,13 @@ fn endpoint_issues(
         });
         return;
     };
-    let by_spelling = url_locality(url);
+    let by_spelling = url_is_local(url);
     match require_local_with(url, r) {
         Err(e) => issues.push(ConfigIssue::NotLocal {
             endpoint: name.to_owned(),
             reason: e.to_string(),
         }),
-        Ok(()) if by_spelling == Locality::Cloud && locality.is_none() => {
+        Ok(()) if !by_spelling && locality.is_none() => {
             issues.push(ConfigIssue::NonLocalAddress {
                 endpoint: name.to_owned(),
                 host: url_host(url).unwrap_or_else(|| url.to_owned()),
@@ -401,7 +400,7 @@ fn endpoint_issues(
         }
         Ok(()) => {}
     }
-    if locality == Some(Locality::Local) && by_spelling == Locality::Cloud && !dns_verified {
+    if locality == Some(Locality::Local) && !by_spelling && !dns_verified {
         issues.push(ConfigIssue::LocalOverrideIgnored {
             endpoint: name.to_owned(),
             model: None,
@@ -410,24 +409,22 @@ fn endpoint_issues(
 }
 
 /// The one locality rule for an endpoint, default or configured, in order:
-/// `locality = "cloud"` is `Cloud`; a local address ([`url_locality`]) is
+/// `locality = "shared"` is `Shared`; a local address ([`url_is_local`]) is
 /// `Local`; `locality = "local"` with `dns_verified` (verified by
 /// [`RoutingConfig::verify_local`]) is `Local`; anything else, including no
-/// URL or an unverified override, is `Cloud` (fail closed).
+/// URL or an unverified override, is `Shared` (fail closed).
 fn effective_locality(
     base_url: Option<&str>,
     locality: Option<Locality>,
     dns_verified: bool,
 ) -> Locality {
-    if locality == Some(Locality::Cloud) {
-        return Locality::Cloud;
+    if locality == Some(Locality::Shared) {
+        return Locality::Shared;
     }
-    if base_url.is_some_and(|u| url_locality(u) == Locality::Local)
-        || (locality == Some(Locality::Local) && dns_verified)
-    {
+    if base_url.is_some_and(url_is_local) || (locality == Some(Locality::Local) && dns_verified) {
         return Locality::Local;
     }
-    Locality::Cloud
+    Locality::Shared
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -444,19 +441,6 @@ pub enum EndpointKind {
 }
 
 impl EndpointKind {
-    /// The kind's own locality: always `Local` (the hosted-API kinds were
-    /// removed in 0.2.0). A kind can still point at a hosted server, so
-    /// decisions about where requests go use
-    /// [`EndpointConfig::effective_locality`] instead.
-    pub fn locality(self) -> Locality {
-        match self {
-            EndpointKind::Ollama
-            | EndpointKind::LlamaRouter
-            | EndpointKind::OpenaiCompat
-            | EndpointKind::Lemonade => Locality::Local,
-        }
-    }
-
     pub fn default_base_url(self) -> Option<&'static str> {
         match self {
             EndpointKind::Ollama => Some("http://localhost:11434"),
@@ -473,8 +457,8 @@ pub struct EndpointConfig {
     pub kind: EndpointKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    /// Operator override of the locality the address implies: `cloud` marks
-    /// the endpoint cloud. `local` is honoured only for a LAN box with a DNS
+    /// Operator override of the locality the address implies: `shared` marks
+    /// the endpoint shared. `local` is honoured only for a LAN box with a DNS
     /// name, and only after [`RoutingConfig::verify_local`] confirmed that
     /// [`require_local`](crate::require_local) passes (it resolves only to
     /// local addresses); otherwise it has no effect and
@@ -520,9 +504,9 @@ impl EndpointConfig {
     }
 
     /// Whether requests to this endpoint leave the machine's network.
-    /// `locality = "cloud"` is `Cloud`; otherwise the
-    /// [`base_url`](Self::base_url) host decides ([`url_locality`]); no URL
-    /// at all is `Cloud` (fail closed). See [`effective_locality`] for the
+    /// `locality = "shared"` is `Shared`; otherwise the
+    /// [`base_url`](Self::base_url) host decides ([`url_is_local`]); no URL
+    /// at all is `Shared` (fail closed). See [`effective_locality`] for the
     /// order; a `local` override counts only once verified.
     pub fn effective_locality(&self) -> Locality {
         effective_locality(self.base_url(), self.locality, self.dns_verified())
@@ -537,8 +521,8 @@ pub struct RosterEntry {
     /// Key of `[routing.endpoints]`; `None` = the product's default backend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
-    /// `cloud` marks this model cloud even on a local endpoint. `local`
-    /// never makes a model on a cloud endpoint local (it is ignored, and
+    /// `shared` marks this model shared even on a local endpoint. `local`
+    /// never makes a model on a shared endpoint local (it is ignored, and
     /// [`RoutingConfig::validate`] reports it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locality: Option<Locality>,
@@ -653,9 +637,7 @@ summarize = { tier = "small" }
     }
 
     #[test]
-    fn endpoint_kinds_know_locality_and_default_urls() {
-        assert_eq!(EndpointKind::Ollama.locality(), Locality::Local);
-        assert_eq!(EndpointKind::OpenaiCompat.locality(), Locality::Local);
+    fn endpoint_kinds_know_default_urls() {
         assert_eq!(
             EndpointKind::Ollama.default_base_url(),
             Some("http://localhost:11434")
@@ -673,7 +655,6 @@ summarize = { tier = "small" }
 
     #[test]
     fn lemonade_is_local_with_its_own_default_port() {
-        assert_eq!(EndpointKind::Lemonade.locality(), Locality::Local);
         assert_eq!(
             EndpointKind::Lemonade.default_base_url(),
             Some("http://127.0.0.1:13305/api")
@@ -686,7 +667,7 @@ summarize = { tier = "small" }
     #[test]
     fn roster_entry_locality_is_explicit_and_optional() {
         let e: RosterEntry = toml::from_str("id = \"claude\"\nlocality = \"cloud\"").unwrap();
-        assert_eq!(e.locality, Some(Locality::Cloud));
+        assert_eq!(e.locality, Some(Locality::Shared));
         let e: RosterEntry = toml::from_str("id = \"x\"").unwrap();
         assert_eq!(e.locality, None);
         assert_eq!(e.priority, None);
@@ -771,16 +752,14 @@ endpoint = "gpu"
     }
 
     #[test]
-    fn a_hosted_openai_compatible_endpoint_is_cloud() {
+    fn a_hosted_openai_compatible_endpoint_is_shared() {
         let groq =
             endpoint("kind = \"openai_compat\"\nbase_url = \"https://api.groq.com/openai/v1\"");
-        assert_eq!(groq.effective_locality(), Locality::Cloud);
-        // A local kind's own locality is not the endpoint's.
-        assert_eq!(groq.kind.locality(), Locality::Local);
+        assert_eq!(groq.effective_locality(), Locality::Shared);
     }
 
     #[test]
-    fn local_addresses_keep_non_cloud_kinds_local() {
+    fn local_addresses_keep_non_shared_kinds_local() {
         for url in [
             "http://127.0.0.1:8080",
             "http://10.0.0.5:11434",
@@ -811,11 +790,11 @@ endpoint = "gpu"
         let public = endpoint(
             "kind = \"ollama\"\nbase_url = \"http://gpu.example.com:11434\"\nlocality = \"local\"",
         );
-        assert_eq!(public.effective_locality(), Locality::Cloud);
+        assert_eq!(public.effective_locality(), Locality::Shared);
         let forced = endpoint(
             "kind = \"ollama\"\nbase_url = \"http://localhost:11434\"\nlocality = \"cloud\"",
         );
-        assert_eq!(forced.effective_locality(), Locality::Cloud);
+        assert_eq!(forced.effective_locality(), Locality::Shared);
         // `local` on a local address is a no-op.
         let same =
             endpoint("kind = \"ollama\"\nbase_url = \"http://127.0.0.1:9\"\nlocality = \"local\"");
@@ -831,10 +810,10 @@ endpoint = "gpu"
     }
 
     #[test]
-    fn a_non_cloud_kind_with_no_address_fails_closed() {
+    fn a_non_shared_kind_with_no_address_fails_closed() {
         assert_eq!(
             endpoint("kind = \"openai_compat\"").effective_locality(),
-            Locality::Cloud
+            Locality::Shared
         );
     }
 
@@ -951,7 +930,7 @@ base_url = "http://nonexistent.example.com"
         // Override + DNS name resolving to the LAN: Local after verify.
         let mut c = src("lan-box.example.com", over);
         let mut d = local_default();
-        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud); // unverified
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Shared); // unverified
         assert_eq!(
             c.validate_with(&d, &stub()),
             vec![ConfigIssue::LocalOverrideIgnored {
@@ -964,25 +943,25 @@ base_url = "http://nonexistent.example.com"
         assert_eq!(c.endpoints["box"].effective_locality(), Locality::Local);
         assert_eq!(c.endpoint_locality(&d, "box"), Some(Locality::Local));
         assert_eq!(c.validate_with(&d, &stub()), vec![]);
-        // No override: Cloud, with the hint.
+        // No override: Shared, with the hint.
         let mut c = src("lan-box.example.com", "");
         assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
-        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Shared);
         assert!(matches!(
             c.validate_with(&d, &stub()).as_slice(),
             [ConfigIssue::NonLocalAddress { .. }]
         ));
-        // Override, but the name resolves public: NotLocal, stays Cloud.
+        // Override, but the name resolves public: NotLocal, stays Shared.
         let mut c = src("pub.example.com", over);
         let issues = c.verify_local_with(&mut d, &stub());
         assert!(
             matches!(issues.as_slice(), [ConfigIssue::NotLocal { endpoint, .. }] if endpoint == "box")
         );
-        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
-        // A cloud override wins over everything.
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Shared);
+        // A shared override wins over everything.
         let mut c = src("127.0.0.1", "locality = \"cloud\"");
         assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
-        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Shared);
         // The default endpoint is verified too, and dns_verified never reaches TOML.
         let mut c = RoutingConfig::default();
         let mut d = default_at(
@@ -1010,11 +989,11 @@ base_url = "http://nonexistent.example.com"
     }
 
     #[test]
-    fn in_process_with_a_public_base_url_set_directly_is_cloud_and_not_local() {
+    fn in_process_with_a_public_base_url_set_directly_is_shared_and_not_local() {
         let mut d = DefaultEndpoint::in_process("mistralrs");
         d.base_url = Some("https://8.8.8.8/v1".into());
         assert!(!d.is_in_process());
-        assert_eq!(d.effective_locality(), Locality::Cloud);
+        assert_eq!(d.effective_locality(), Locality::Shared);
         let c = RoutingConfig::default();
         let issues = c.validate_with(&d, &Forbidden);
         assert!(
@@ -1041,25 +1020,25 @@ base_url = "http://nonexistent.example.com"
         // Trust can still be lowered; a URL makes it ordinary again.
         assert_eq!(
             d.clone()
-                .with_locality(Locality::Cloud)
+                .with_locality(Locality::Shared)
                 .effective_locality(),
-            Locality::Cloud
+            Locality::Shared
         );
         assert!(!d.with_base_url("https://api.groq.com").is_in_process());
     }
 
     #[test]
-    fn an_ordinary_endpoint_with_no_url_stays_cloud_even_with_a_local_override() {
+    fn an_ordinary_endpoint_with_no_url_stays_shared_even_with_a_local_override() {
         let d =
             DefaultEndpoint::new("main", EndpointKind::OpenaiCompat).with_locality(Locality::Local);
-        assert_eq!(d.effective_locality(), Locality::Cloud);
+        assert_eq!(d.effective_locality(), Locality::Shared);
         let ep =
             EndpointConfig::new(EndpointKind::OpenaiCompat, None).with_locality(Locality::Local);
-        assert_eq!(ep.effective_locality(), Locality::Cloud);
+        assert_eq!(ep.effective_locality(), Locality::Shared);
         let mut c = RoutingConfig::default();
         let mut d = d;
         assert_eq!(c.verify_local_with(&mut d, &stub()), vec![]);
-        assert_eq!(d.effective_locality(), Locality::Cloud);
+        assert_eq!(d.effective_locality(), Locality::Shared);
     }
 
     #[test]
@@ -1081,16 +1060,16 @@ base_url = "http://nonexistent.example.com"
         // Pointing it elsewhere afterwards fails closed.
         c.endpoints.get_mut("box").unwrap().base_url = Some("http://pub.example.com:11434".into());
         assert!(!c.endpoints["box"].dns_verified());
-        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Cloud);
+        assert_eq!(c.endpoints["box"].effective_locality(), Locality::Shared);
         // Constructors on the default endpoint.
         let d = DefaultEndpoint::new("m", EndpointKind::OpenaiCompat)
             .with_base_url("http://10.0.0.2:1")
-            .with_locality(Locality::Cloud);
-        assert_eq!(d.effective_locality(), Locality::Cloud);
+            .with_locality(Locality::Shared);
+        assert_eq!(d.effective_locality(), Locality::Shared);
     }
 
     #[test]
-    fn validate_reports_a_roster_local_override_on_a_cloud_endpoint() {
+    fn validate_reports_a_roster_local_override_on_a_shared_endpoint() {
         let c = toml::from_str::<Doc>(
             r#"
 [routing.endpoints.claude]
@@ -1145,13 +1124,13 @@ locality = "local"
         );
         assert_eq!(
             issues[0].to_string(),
-            "model `claude-sonnet` is on cloud endpoint `claude`; its `locality = \"local\"` is ignored"
+            "model `claude-sonnet` is on shared endpoint `claude`; its `locality = \"local\"` is ignored"
         );
-        let cloud_default = DefaultEndpoint {
+        let shared_default = DefaultEndpoint {
             name: EndpointRef::new("main"),
             kind: EndpointKind::OpenaiCompat,
             base_url: Some("http://127.0.0.1:9".into()),
-            locality: Some(Locality::Cloud),
+            locality: Some(Locality::Shared),
             dns_verified: Default::default(),
             in_process: false,
         };
@@ -1159,7 +1138,7 @@ locality = "local"
             .unwrap()
             .routing;
         assert_eq!(
-            c.validate_with(&cloud_default, &stub()),
+            c.validate_with(&shared_default, &stub()),
             vec![ConfigIssue::LocalOverrideIgnored {
                 endpoint: "main".into(),
                 model: Some("x".into())
@@ -1188,9 +1167,9 @@ locality = "local"
                 OpenaiCompat,
                 Some("https://api.groq.com/openai/v1"),
                 None,
-                Cloud,
+                Shared,
             ),
-            (Ollama, Some("http://gpu.example.com:11434"), None, Cloud),
+            (Ollama, Some("http://gpu.example.com:11434"), None, Shared),
             (OpenaiCompat, Some("http://127.0.0.1:8080"), None, Local),
             (
                 OpenaiCompat,
@@ -1202,15 +1181,15 @@ locality = "local"
             // The kind's default URL.
             (Ollama, None, None, Local),
             // No address at all fails closed.
-            (OpenaiCompat, None, None, Cloud),
+            (OpenaiCompat, None, None, Shared),
             // An override can only lower trust.
             (
                 Ollama,
                 Some("http://gpu.example.com:11434"),
                 Some(Local),
-                Cloud,
+                Shared,
             ),
-            (Ollama, Some("http://localhost:11434"), Some(Cloud), Cloud),
+            (Ollama, Some("http://localhost:11434"), Some(Shared), Shared),
             (Ollama, Some("http://127.0.0.1:9"), Some(Local), Local),
         ] {
             let d = default_at(kind, url, locality);

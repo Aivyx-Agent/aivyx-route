@@ -41,10 +41,10 @@ skips the discovery clients (feature `discovery`, off by default).
 - `src/router.rs` — the shared stateful layer (stickiness, pins, cooldowns) products wrap around select().
 - `src/sessions.rs` — `SessionMap`, the size-capped per-session map the Router keeps its per-conversation state in (default `MAX_SESSIONS` = 1024, least recently updated evicted).
 - `src/config.rs` — the `[routing]` TOML shape both products embed.
-- `src/locality.rs` — `url_locality()`: Local vs Cloud from an endpoint URL's host as the `url` crate (WHATWG, like reqwest) parses it; no DNS; `EndpointConfig::effective_locality()` builds on it.
+- `src/locality.rs` — `url_is_local()`: whether an endpoint URL's host is local, as the host as the `url` crate (WHATWG, like reqwest) parses it; no DNS; `EndpointConfig::effective_locality()` builds on it.
 - `src/merge.rs` — discovery reports + roster → `Vec<ModelProfile>`.
 - `src/classifier.rs` — optional small-model classifier prompt/parse.
-- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O. Concurrent, deadline-bounded, 8 MiB body cap, no redirects; never contacts an endpoint whose `effective_locality()` is Cloud or that fails `require_local`.
+- `src/discovery/` — HTTP clients (feature `discovery`); the only I/O. Concurrent, deadline-bounded, 8 MiB body cap, no redirects; never contacts an endpoint whose `effective_locality()` is Shared or that fails `require_local`.
 
 Models are identified by `ModelKey` (endpoint, id), never by id alone.
 
