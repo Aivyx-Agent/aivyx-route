@@ -1,7 +1,7 @@
 //! The local-only guard: `require_local` accepts a URL only when it points
 //! at a server on this machine or the operator's own network.
 //!
-//! Local means `url_locality(url) == Local`, or a domain that resolves to at
+//! Local means `url_is_local(url)`, or a domain that resolves to at
 //! least one address, every one of which is local under the same IP rules.
 
 use std::fmt;
@@ -12,6 +12,12 @@ use url::{Host, Url};
 use crate::locality::{domain_is_local, ip_is_local, parse_http_url};
 
 /// Resolves a host to its addresses (a seam for tests).
+///
+/// This is this crate's own **blocking** resolver seam, used by
+/// [`require_local_with`] and [`resolve_local_with`]. It is not
+/// `reqwest::dns::Resolve` (async, takes a `Name`); the reqwest-facing
+/// [`LocalOnlyDns`](crate::discovery::LocalOnlyDns) implements that trait on
+/// top of this one.
 pub trait Resolve: Send + Sync {
     fn resolve(&self, host: &str, port: u16) -> std::io::Result<Vec<IpAddr>>;
 }
@@ -36,12 +42,53 @@ pub struct NotLocal {
     pub reason: NotLocalReason,
 }
 
+/// Why a URL is not local.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotLocalReason {
+    /// A known cloud API host (named without a lookup).
     CloudHost,
+    /// The host is, or resolves to, a public address.
     PublicAddress(IpAddr),
+    /// A multicast or broadcast address: IPv4 `224.0.0.0/4`, IPv4
+    /// `255.255.255.255` or IPv6 `ff00::/8`. These reach many hosts, never
+    /// one local server, so they are refused ahead of the public check.
+    NotUnicast(IpAddr),
+    /// The name does not resolve to any address.
     DoesNotResolve,
+    /// Not an http(s) URL.
     NotHttp,
+}
+
+/// The reason an address that is not local is refused: multicast and
+/// broadcast get [`NotLocalReason::NotUnicast`], the rest `PublicAddress`.
+fn address_reason(ip: IpAddr) -> NotLocalReason {
+    if is_multicast_or_broadcast(ip) {
+        NotLocalReason::NotUnicast(ip)
+    } else {
+        NotLocalReason::PublicAddress(ip)
+    }
+}
+
+fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_multicast() || v4.is_broadcast(),
+        IpAddr::V6(v6) => v6.is_multicast(),
+    }
+}
+
+/// `host`, or `host:port` when `port` is not 0; IPv6 hosts are bracketed.
+fn host_port(host: &str, port: u16) -> String {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    let host = if bare.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{bare}]")
+    } else {
+        host.to_string()
+    };
+    if port == 0 {
+        host
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 impl fmt::Display for NotLocal {
@@ -51,6 +98,9 @@ impl fmt::Display for NotLocal {
             NotLocalReason::CloudHost => write!(f, "cloud host")?,
             NotLocalReason::PublicAddress(ip) => {
                 write!(f, "resolves to a public address {ip}")?;
+            }
+            NotLocalReason::NotUnicast(ip) => {
+                write!(f, "multicast or broadcast address {ip}")?;
             }
             NotLocalReason::DoesNotResolve => write!(f, "doesn't resolve")?,
             NotLocalReason::NotHttp => write!(f, "not an http(s) URL")?,
@@ -96,7 +146,8 @@ pub fn resolve_local(host: &str, port: u16) -> Result<Vec<SocketAddr>, NotLocal>
 /// or not) is returned as-is when local; a known cloud host is refused without
 /// a lookup; any other name must resolve to at least one address, all local
 /// (even a `.lan`/`.local` name: what it connects to is what counts).
-/// `NotLocal.url` is `host:port`.
+/// `NotLocal.url` is `host:port`, or just the host when `port` is 0; an IPv6
+/// host is bracketed.
 pub fn resolve_local_with(
     host: &str,
     port: u16,
@@ -104,7 +155,7 @@ pub fn resolve_local_with(
 ) -> Result<Vec<SocketAddr>, NotLocal> {
     let fail = |reason| {
         Err(NotLocal {
-            url: format!("{host}:{port}"),
+            url: host_port(host, port),
             reason,
         })
     };
@@ -113,7 +164,7 @@ pub fn resolve_local_with(
         return if ip_is_local(ip) {
             Ok(vec![SocketAddr::new(ip, port)])
         } else {
-            fail(NotLocalReason::PublicAddress(ip))
+            fail(address_reason(ip))
         };
     }
     if is_cloud_host(&host.to_ascii_lowercase()) {
@@ -123,7 +174,7 @@ pub fn resolve_local_with(
         Err(_) => fail(NotLocalReason::DoesNotResolve),
         Ok(addrs) if addrs.is_empty() => fail(NotLocalReason::DoesNotResolve),
         Ok(addrs) => match addrs.iter().find(|ip| !ip_is_local(**ip)) {
-            Some(ip) => fail(NotLocalReason::PublicAddress(*ip)),
+            Some(ip) => fail(address_reason(*ip)),
             None => Ok(addrs
                 .into_iter()
                 .map(|ip| SocketAddr::new(ip, port))
@@ -165,7 +216,7 @@ pub fn require_local_with(url: &str, r: &dyn Resolve) -> Result<(), NotLocal> {
                 Err(_) => fail(shown, NotLocalReason::DoesNotResolve),
                 Ok(addrs) if addrs.is_empty() => fail(shown, NotLocalReason::DoesNotResolve),
                 Ok(addrs) => match addrs.into_iter().find(|ip| !ip_is_local(*ip)) {
-                    Some(ip) => fail(shown, NotLocalReason::PublicAddress(ip)),
+                    Some(ip) => fail(shown, address_reason(ip)),
                     None => Ok(()),
                 },
             }
@@ -180,7 +231,7 @@ fn check_ip(shown: String, ip: IpAddr) -> Result<(), NotLocal> {
     } else {
         Err(NotLocal {
             url: shown,
-            reason: NotLocalReason::PublicAddress(ip),
+            reason: address_reason(ip),
         })
     }
 }
@@ -487,5 +538,57 @@ mod tests {
             NotLocalReason::PublicAddress("8.8.8.8".parse().unwrap())
         );
         assert_eq!(stub.calls.load(Ordering::SeqCst), 0, "no lookups");
+    }
+
+    #[test]
+    fn not_local_url_shapes() {
+        let stub = Stub::default();
+        let url = |host, port| resolve_local_with(host, port, &stub).unwrap_err().url;
+        assert_eq!(url("api.openai.com", 0), "api.openai.com");
+        assert_eq!(url("api.openai.com", 443), "api.openai.com:443");
+        assert_eq!(url("8.8.8.8", 8090), "8.8.8.8:8090");
+        assert_eq!(url("2606:4700::1111", 8090), "[2606:4700::1111]:8090");
+        assert_eq!(url("[2606:4700::1111]", 8090), "[2606:4700::1111]:8090");
+        assert_eq!(url("2606:4700::1111", 0), "[2606:4700::1111]");
+        assert_eq!(url("nope.example.com", 0), "nope.example.com");
+    }
+
+    #[test]
+    fn multicast_and_broadcast_are_not_unicast() {
+        let stub = Stub::default();
+        for (u, addr) in [
+            ("http://224.0.0.1/", "224.0.0.1"),
+            ("http://255.255.255.255/", "255.255.255.255"),
+            ("http://[ff02::1]/", "ff02::1"),
+        ] {
+            assert_eq!(
+                reason(u, &stub),
+                NotLocalReason::NotUnicast(ip(addr)),
+                "{u}"
+            );
+        }
+        for h in ["224.0.0.1", "255.255.255.255", "ff02::1"] {
+            let e = resolve_local_with(h, 80, &stub).unwrap_err();
+            assert_eq!(e.reason, NotLocalReason::NotUnicast(ip(h)), "{h}");
+        }
+        let mut stub = Stub::default();
+        stub.map.insert("mc.example.com", Ok(vec![ip("224.0.0.1")]));
+        assert_eq!(
+            reason("http://mc.example.com/", &stub),
+            NotLocalReason::NotUnicast(ip("224.0.0.1"))
+        );
+        assert_eq!(
+            resolve_local_with("mc.example.com", 80, &stub)
+                .unwrap_err()
+                .reason,
+            NotLocalReason::NotUnicast(ip("224.0.0.1"))
+        );
+        let text = require_local_with("http://224.0.0.1/", &stub)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains("(multicast or broadcast address 224.0.0.1)"),
+            "{text}"
+        );
     }
 }

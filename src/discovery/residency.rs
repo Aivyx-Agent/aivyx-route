@@ -834,7 +834,13 @@ mod tests {
             base_url: server.uri(),
         };
         // The broker's VRAM wins over the operator figure.
-        let snap = collect(&[], Some(&broker), Some(1), &reqwest::Client::new()).await;
+        let snap = collect(
+            &[],
+            Some(&broker),
+            Some(1),
+            &crate::discovery::client().unwrap(),
+        )
+        .await;
         assert_eq!(
             snap.models[&key("backend", "qwen3-8b")],
             ModelResidency::Loaded { vram_bytes: None }

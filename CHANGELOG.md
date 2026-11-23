@@ -20,6 +20,20 @@ Breaking.
   docs say "shared". `NotLocalReason::CloudHost` and its `cloud host` text
   are unchanged.
 
+- `LocalOnlyDns` is no longer a unit struct (it holds a resolver): build it
+  with `LocalOnlyDns::new()` or `LocalOnlyDns::with_resolver(Arc<dyn Resolve>)`.
+
+### Added
+
+- `NotLocalReason::NotUnicast(IpAddr)`, "multicast or broadcast address
+  <ip>": IPv4 `224.0.0.0/4`, `255.255.255.255` and IPv6 `ff00::/8` are
+  refused with it instead of `PublicAddress`.
+
+### Fixed
+
+- `NotLocal.url` from `resolve_local_with` / `LocalOnlyDns` showed `host:0`
+  and unbracketed IPv6; it is now `host`, `host:port` or `[v6]:port`.
+
 ### Removed
 
 - `url_locality` (use `url_is_local`), `EndpointKind::locality()` and

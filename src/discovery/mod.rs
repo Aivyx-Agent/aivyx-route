@@ -66,7 +66,7 @@ pub const MAX_BODY_BYTES: u64 = 8 << 20;
 /// X1).
 pub fn client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
-        .dns_resolver(std::sync::Arc::new(LocalOnlyDns))
+        .dns_resolver(std::sync::Arc::new(LocalOnlyDns::new()))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
