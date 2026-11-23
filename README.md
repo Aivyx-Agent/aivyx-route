@@ -140,7 +140,7 @@ products warn at startup.
 the client connects. For that gap, `resolve_local(host, port)` returns the
 addresses only if all are local, and (feature `discovery`) `LocalOnlyDns` is
 a reqwest resolver doing the same at connect time. Build clients with
-`Client::builder().dns_resolver(Arc::new(LocalOnlyDns)).redirect(Policy::none()).no_proxy()`
+`Client::builder().dns_resolver(Arc::new(LocalOnlyDns::new())).redirect(Policy::none()).no_proxy()`
 (`discovery::client()` already does). `.no_proxy()` matters: reqwest
 otherwise honours `HTTP_PROXY`/`ALL_PROXY`, and an IP-literal proxy bypasses
 both guards. reqwest skips the resolver for IP-literal URLs, so keep the
